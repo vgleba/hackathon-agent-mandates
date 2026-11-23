@@ -45,6 +45,7 @@ attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if 
 	for key in day_2_attack/keys/*.jwk; do \
 		[ -e "$$key" ] || { echo "no keys in day_2_attack/keys"; exit 1; }; \
 		team=$$(basename "$$key" .jwk); \
+		uv run python -m gateway.cli person --principal "attacker:$$team" --name "$$team" --urns '*' --clearance 4 --daily-pupils 300 > /dev/null; \
 		uv run python -m gateway.cli issue --agent-key "$$key" --ttl 86400 -o "day_2_attack/mandates/$$team.jwt" \
 			--principal "attacker:$$team" --purpose "Day 2 attack mandate for $$team"; \
 		if [ -n "$(FEATURE_SCOPE)$(FEATURE_CLAIMS)" ]; then \
@@ -56,7 +57,7 @@ attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if 
 
 test:
 	cd mcp_server && uv sync --group dev --extra fastapi --extra synth && uv run python -m pytest --cov=mcp_server -v --cov-report=term-missing --cov-fail-under=0
-	uv run python -m pytest gateway/tests
+	uv run python -m pytest gateway/tests desk/tests
 
 .PHONY: lint
 lint:  ## Check code formatting & linting

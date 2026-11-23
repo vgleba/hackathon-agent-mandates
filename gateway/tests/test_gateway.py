@@ -70,8 +70,9 @@ def test_tampered_mandate_is_denied(gw):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "SIG_INVALID")
 
 
-def test_demo_walkthrough(gw):
+def test_demo_walkthrough(gw, monkeypatch):
     client, _, _ = gw
+    monkeypatch.setenv("GATEWAY_DEMO", "1")  # off by default
     m = client.post("/demo/mandate", json={"urn": "SCH01"}).json()
     assert m["header"]["typ"] == "mandate+jwt"
     assert m["claims"]["scope"][0]["constraints"] == {"urn": ["SCH01"]}
@@ -156,6 +157,6 @@ def test_eval_set_passes_against_template_gateway(gw, tmp_path):
         return r.status_code, r.json()
 
     results = ev.run_cases(tmp_path / "pack", post)
-    # questions 3 to 5 are the teams' build work, so only the starter's questions 0 to 2 must pass
-    assert [line for ok, line in results if not ok and line[:2] in {"Q0", "Q1", "Q2"}] == []
+    # questions 4 and 5 are still to build, so only questions 0 to 3 must pass
+    assert [line for ok, line in results if not ok and line[:2] in {"Q0", "Q1", "Q2", "Q3"}] == []
     assert len(results) == len(ev.VALID) + len(ev.INVALID) + len(ev.BUILD)

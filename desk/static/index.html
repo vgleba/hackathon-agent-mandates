@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Desk</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Desk</h1>
+    <p id="hello"></p>
+    <button id="signout" class="quiet" hidden>Sign out</button>
+  </header>
+
+  <main>
+    <div id="message" class="message" role="alert" hidden></div>
+    <section id="signed-out" hidden>
+      <h2>You are signed out</h2>
+      <p>Open a new sign-in link. Each link works once.</p>
+    </section>
+
+    <div id="desk" hidden>
+      <section id="alarm" class="alarm" hidden>
+        <h2>Someone may have tried to use your access</h2>
+        <p>It was refused and nothing was given out. If you did not expect this, stop everything and tell your data protection lead.</p>
+        <button data-go="activity">See what happened</button>
+      </section>
+
+      <section id="waiting" class="waiting" hidden aria-live="polite">
+        <h2>Waiting for you</h2>
+        <div id="waiting-list"></div>
+      </section>
+
+      <section id="step-ask">
+        <h2 tabindex="-1">What do you need done?</h2>
+        <form id="say">
+          <label for="text">Say it in your own words</label>
+          <textarea id="text" rows="2" maxlength="500" placeholder="For example: absence letters for Dunmore Year 11"></textarea>
+          <button>Next</button>
+        </form>
+        <p id="say-note" class="note" aria-live="polite"></p>
+        <p>Or choose a job:</p>
+        <ul id="tiles" class="tiles"></ul>
+      </section>
+
+      <section id="step-form" hidden>
+        <h2 tabindex="-1" id="form-title"></h2>
+        <p id="form-about"></p>
+        <p id="form-note" class="note" hidden></p>
+        <form id="blanks"></form>
+        <div class="row">
+          <button id="form-next">Check it</button>
+          <button class="quiet" data-back="ask">Start again</button>
+        </div>
+      </section>
+
+      <section id="step-review" hidden>
+        <h2 tabindex="-1">Check before you start</h2>
+        <p id="review-title" class="lead"></p>
+        <div id="review"></div>
+        <div class="row">
+          <button id="start">Give access and start</button>
+          <button class="quiet" data-back="form">Go back and change it</button>
+        </div>
+      </section>
+
+      <section id="handover" hidden>
+        <h2>Work to take over</h2>
+        <div id="handover-list"></div>
+      </section>
+
+      <section id="work" hidden aria-live="polite">
+        <div class="row between">
+          <h2>Your assistants</h2>
+          <button id="stop-all" class="stop" hidden>Stop everything</button>
+        </div>
+        <div id="work-list"></div>
+      </section>
+
+      <section id="activity">
+        <h2>What has happened in your name</h2>
+        <p>Everything your assistants did or tried to do.</p>
+        <button id="show-activity" class="quiet">Show activity</button>
+        <div id="activity-list"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

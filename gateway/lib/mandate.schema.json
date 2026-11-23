@@ -157,6 +157,45 @@
           }
         }
       }
+    },
+    "clearance": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "The most sensitive data it may see, on the manifest's scale. Absent means 3: never special category"
+    },
+    "purpose_code": {
+      "type": "string",
+      "description": "The job it is for, from PURPOSES in gateway/lib/policy.py. Limits the tools and caps the clearance"
+    },
+    "budget": {
+      "type": "object",
+      "required": [
+        "pupils"
+      ],
+      "properties": {
+        "pupils": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Different pupils the whole job may see, helpers included. Absent means 50"
+    },
+    "may_delegate": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "1 if the agent may hand part of this on to helpers"
+    },
+    "helpers": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "description": "Revocation numbers set aside for helpers; a helper must use one"
+    },
+    "shown": {
+      "type": "string",
+      "description": "Hash of the words the person was shown before signing"
     }
   }
 }

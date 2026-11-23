@@ -5,16 +5,23 @@ shortcut: a real agent holds its own key; this is for teaching only, never deplo
 """
 
 import json
+import os
 
 import jwt
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from gateway.cli import issue_mandate, load_or_create_key, revoke_mandate, sign_request
 from gateway.lib.gateway_verify import Request
 
-router = APIRouter(prefix="/demo", tags=["demo"])
+
+def require_demo() -> None:
+    """These routes sign with the issuer's and the agent's keys for whoever asks, so they are off by default."""
+    if os.environ.get("GATEWAY_DEMO") != "1":
+        raise HTTPException(404, "Not Found")
+
+
+router = APIRouter(prefix="/demo", tags=["demo"], dependencies=[Depends(require_demo)])
 
 
 def _gw():
@@ -153,8 +160,7 @@ async def demo_call(body: CallDemoBody):
         arguments=body.arguments,
         mandate=(state_dir / "demo_mandate.jwt").read_text().strip(),
     )
-    resp = await gw.tools_call(gw.CallBody(**signed))
-    status, payload = (resp.status_code, json.loads(resp.body)) if isinstance(resp, JSONResponse) else (200, resp)
+    status, payload = await gw.handle(gw.CallBody(**signed), "demo page")
     return {
         "explanation": (
             "The agent signs each call with its own key: The gateway checks: the mandate is genuine -> from a trusted "

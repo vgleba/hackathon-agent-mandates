@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mandate lab</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Mandate lab</h1>
+      <p class="lede">Every request here is signed once and sent to two gateways:
+        <span class="key before"><i aria-hidden="true"></i>before</span> our changes and
+        <span class="key after"><i aria-hidden="true"></i>after</span> them.</p>
+    </div>
+    <ul id="health" class="health" aria-label="Services"></ul>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-overview" aria-controls="overview">Overview</button>
+    <button role="tab" id="tab-q1" aria-controls="q1">Question 1</button>
+    <button role="tab" id="tab-q2" aria-controls="q2">Question 2</button>
+    <button role="tab" id="tab-q3" aria-controls="q3">Question 3</button>
+    <button role="tab" id="tab-q45" aria-controls="q45">Questions 4 and 5</button>
+    <button role="tab" id="tab-open" aria-controls="open">Questions 6 to 16</button>
+    <button role="tab" id="tab-attacks" aria-controls="attacks">Attacks</button>
+    <button role="tab" id="tab-changes" aria-controls="changes">What changed</button>
+  </nav>
+
+  <main>
+    <div id="error" class="error" role="alert" hidden></div>
+
+    <section id="overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
+      <h2>“Just pull everything for Brookmere, I’ll sort through it.”</h2>
+      <p>One call: a blank search with a limit of 1,000. Each square is one pupil at the school. A filled square is a
+        pupil whose record left the gateway.</p>
+      <div id="hero" class="pair" aria-live="polite"></div>
+
+      <h2>Score</h2>
+      <p>The hackathon’s own eval, run against both gateways just now. <button class="link" id="rescore">Run it again</button></p>
+      <div class="scroll"><table id="score" aria-live="polite"></table></div>
+      <p class="note">Question 0 is the safeguard: ordinary work that must stay allowed. A gateway that refuses
+        everything would fail it.</p>
+    </section>
+
+    <section id="q1" role="tabpanel" aria-labelledby="tab-q1" hidden>
+      <h2 class="ask" data-ask="1"></h2>
+      <p>Is the mandate in date, and has it been withdrawn? Expiry happens by itself. Taking access back is a person
+        changing their mind. A mandate needs both.</p>
+      <div class="panel">
+        <h3>Grant it, use it, take it back</h3>
+        <p>Makes a real mandate, uses it, revokes it and tries again. No restart: the gateway reads the revocation list on every call.</p>
+        <button id="takeback">Run the four steps</button>
+        <div id="takeback-out" aria-live="polite"></div>
+      </div>
+      <p class="note">Both gateways get these right. What changed for question 1 is underneath: junk could crash the
+        check. See <a href="#attacks">Attacks</a>.</p>
+      <div class="cases" data-question="1"></div>
+    </section>
+
+    <section id="q2" role="tabpanel" aria-labelledby="tab-q2" hidden>
+      <h2 class="ask" data-ask="2"></h2>
+      <p>Is this call inside what the mandate allows? Anything not granted is refused, and leaving out a limited
+        argument is refused too: a missing limit never means “no limit”.</p>
+      <p class="note">Both gateways get these right. What changed for question 2 is underneath: anyone could have a new
+        mandate made for them. See <a href="#attacks">Attacks</a>.</p>
+      <div class="cases" data-question="2"></div>
+    </section>
+
+    <section id="q3" role="tabpanel" aria-labelledby="tab-q3" hidden>
+      <h2 class="ask" data-ask="3"></h2>
+      <p>Right school, but how much is too much? The mandate says <em>which</em> school and nothing about
+        <em>how many</em> pupils. Three layers now decide that.</p>
+      <ol class="layers" id="layers"></ol>
+
+      <div class="panel">
+        <h3>Try to get the school out</h3>
+        <form id="play">
+          <label>School <select name="urn" id="play-urn"></select></label>
+          <label>Search for <input name="query" id="play-query" maxlength="40" autocomplete="off" spellcheck="false"></label>
+          <label>Limit <input name="limit" id="play-limit" maxlength="8" size="8" autocomplete="off" placeholder="not set"></label>
+          <label>Send it as <select name="kind" id="play-kind"><option value="number">a number</option><option value="text">text</option></select></label>
+          <button>Send to both</button>
+        </form>
+        <div class="presets" id="presets" role="group" aria-label="Examples"></div>
+        <div id="play-out" aria-live="polite"></div>
+      </div>
+      <div class="cases" data-question="3"></div>
+      <h3 class="spaced">Ordinary work that must still be allowed (question 0)</h3>
+      <div class="cases" data-question="0"></div>
+    </section>
+
+    <section id="q45" role="tabpanel" aria-labelledby="tab-q45" hidden>
+      <h2 class="ask" data-ask="4"></h2>
+      <p>Is this the same file the mandate allows, written differently? Harmless differences are cleaned away. Anything a
+        server might read as another file is refused.</p>
+      <div class="cases" data-question="4"></div>
+      <h2 class="ask" data-ask="5"></h2>
+      <p>Does <em>any</em> part of the mandate allow this? Each part is judged alone, and two are never mixed.</p>
+      <div class="cases" data-question="5"></div>
+    </section>
+
+    <section id="open" role="tabpanel" aria-labelledby="tab-open" hidden>
+      <h2>The open questions</h2>
+      <p>No eval and no single right answer. Each shows a real mandate, what it allows, what it refuses, and what is
+        still unresolved. The staff view of all of this is Desk: <code>python -m desk</code>.</p>
+      <div class="cases" id="open-list"></div>
+    </section>
+
+    <section id="attacks" role="tabpanel" aria-labelledby="tab-attacks" hidden>
+      <h2>Two attacks that go around questions 1 and 2</h2>
+      <div class="panel">
+        <h3>Have the gateway make a mandate for you</h3>
+        <p>No key and no mandate. Ask the demo routes for a mandate at Greystone School, then use it to read one
+          pupil’s full record. The mandate is revoked straight afterwards.</p>
+        <button data-attack="mint">Try it on both</button>
+        <div id="attack-mint" aria-live="polite"></div>
+      </div>
+      <div class="panel">
+        <h3>Send something that is not a mandate</h3>
+        <p>One request with the text <code>not-a-mandate</code>. A crash is not a refusal: it means a security check
+          met something nobody planned for.</p>
+        <button data-attack="junk">Try it on both</button>
+        <div id="attack-junk" aria-live="polite"></div>
+      </div>
+      <div class="panel">
+        <h3>What these changes do not stop</h3>
+        <ul>
+          <li><strong>Differencing.</strong> Rounding limits what subtracting two counts can say. It does not end it (question 8).</li>
+          <li><strong>Misuse inside the job.</strong> The purpose stops other jobs, not a badly done one (question 12).</li>
+          <li><strong>A patient agent</strong> can come back tomorrow, and two can pool what they see (question 11).</li>
+          <li><strong>Whoever runs the gateway</strong> could rewrite the whole record. Only a copy held elsewhere shows it (question 14).</li>
+          <li><strong>Going round the gateway.</strong> The data server itself still asks for no key.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="changes" role="tabpanel" aria-labelledby="tab-changes" hidden>
+      <h2>What changed, and why</h2>
+      <p>Compared with commit <code id="baseline"></code>. Open a file to see the exact lines.</p>
+      <div id="change-list"></div>
+    </section>
+  </main>
+
+  <footer>Synthetic data, treated as real: this page receives counts and column names, never a pupil’s record.</footer>
+</body>
+</html>

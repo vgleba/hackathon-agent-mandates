@@ -12,22 +12,22 @@ count them. Order of checks is deliberate: cheapest and most definitive first.
 from __future__ import annotations
 
 import fnmatch
+import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field, fields
 
 import jwt
 
+from . import delegation, paths, volume
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
+from .errors import Reject
 from .status_list import is_revoked
+from .store import Store
 
-POLICY_VERSION = "2026-11-18.1"
+POLICY_VERSION = "2026-11-23.2"
 CLOCK_SKEW = 30
-
-
-class Reject(Exception):
-    def __init__(self, code: str, detail: str = ""):
-        super().__init__(f"{code}: {detail}")
-        self.code, self.detail = code, detail
+OWN_SERVER = "gateway"   # where an agent asks after a call that is waiting for a person
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,9 +40,12 @@ class Decision:
     agent_id: str | None
     ts: float
     detail: str = ""
+    # for the gateway only, never sent to the agent
+    claims: dict | None = field(default=None, repr=False)      # genuine: the issuer signed them
+    arguments: dict | None = field(default=None, repr=False)   # as checked, which is what gets forwarded
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("claims", "arguments")}
 
 
 @dataclass
@@ -67,10 +70,13 @@ class Request:
 
 def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
     """Returns the verified claims. Raises Reject."""
-    hdr = jwt.get_unverified_header(token)
-    if hdr.get("typ") != "mandate+jwt":
-        raise Reject("WRONG_TOKEN_TYPE", hdr.get("typ"))
-    unverified = jwt.decode(token, options={"verify_signature": False})
+    try:
+        hdr = jwt.get_unverified_header(token)
+        if hdr.get("typ") != "mandate+jwt":
+            raise Reject("WRONG_TOKEN_TYPE", hdr.get("typ"))
+        unverified = jwt.decode(token, options={"verify_signature": False})
+    except jwt.PyJWTError as e:
+        raise Reject("WRONG_TOKEN_TYPE", "not a readable mandate") from e
 
     pub = registry.issuer_key(unverified["iss"], hdr.get("kid", ""))
     if pub is None:
@@ -83,68 +89,158 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
 
     now = time.time()
     if claims.get("nbf", 0) > now + CLOCK_SKEW:
-        raise Reject("NOT_YET_VALID", claims["jti"])
+        raise Reject("NOT_YET_VALID", claims["jti"], claims)
     if claims["exp"] < now - CLOCK_SKEW:
-        raise Reject("EXPIRED", claims["jti"])
+        raise Reject("EXPIRED", claims["jti"], claims)
 
     sl = claims["status"]["status_list"]
     sl_jwt = status_lists.get(sl["uri"])
     if sl_jwt is None:
-        raise Reject("STATUS_UNAVAILABLE", sl["uri"])     # fail closed
+        raise Reject("STATUS_UNAVAILABLE", sl["uri"], claims)     # fail closed
     try:
         if is_revoked(sl_jwt, sl["idx"], pub, sl["uri"]):
-            raise Reject("REVOKED", claims["jti"])
+            raise Reject("REVOKED", claims["jti"], claims)
     except ValueError as e:
-        raise Reject("STATUS_UNAVAILABLE", str(e))
+        raise Reject("STATUS_UNAVAILABLE", str(e), claims) from e
     return claims
 
 
 # ---------------------------------------------------------------- scope
 
-def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patterns: list[str]) -> tuple[str, str, str]:
+def _permits(value, allowed: list) -> bool:
+    """One value, or a list in which every item is allowed. A list or object may also be allowed as a whole."""
+    plain = {str(a) for a in allowed if not isinstance(a, (list, dict))}
+    if isinstance(value, (list, dict)):
+        if any(type(a) is type(value) and canonical(a) == canonical(value) for a in allowed):
+            return True
+        return isinstance(value, list) and bool(value) and all(
+            isinstance(v, (str, int)) and not isinstance(v, bool) and str(v) in plain for v in value
+        )
+    return str(value) in plain
+
+
+def _failures(arguments: dict, constraints: dict) -> list[tuple[str, str]]:
+    found = []
+    for k, allowed in constraints.items():
+        if k not in arguments:
+            found.append(("CONSTRAINT_MISSING", k))
+        elif not _permits(arguments[k], allowed):
+            found.append(("CONSTRAINT_VIOLATED", f"{k}={arguments[k]!r}"))
+    return found
+
+
+def match_scope(server: str, tool: str, arguments: dict, scope: list[dict]) -> tuple[str, str] | None:
+    """None if any one entry accepts the whole call, else the reason from the entry that came closest.
+
+    Each entry is judged alone: a call can never take its school from one entry and its file from another.
+    """
+    closest = None
+    for entry in scope:
+        if entry["server"] != server or tool not in entry["tools"]:
+            continue
+        found = _failures(arguments, entry.get("constraints", {}))
+        if not found:
+            return None
+        if closest is None or len(found) < len(closest):
+            closest = found
+    return closest[0] if closest else ("OUT_OF_SCOPE", f"{server}.{tool}")
+
+
+def check_request(req: Request, arguments: dict, scopes: list[list[dict]], deny: list[str],
+                  step_up_patterns: list[str]) -> tuple[str, str, str]:
+    """Every scope in `scopes` must allow the call: a mandate has one, a helper's also has its parent's."""
     name = f"{req.server}.{req.tool}"
     for pat in deny:
         if fnmatch.fnmatch(name, pat):
             return "DENY", "DENIED_BY_RULE", pat
-    for entry in scope:
-        if entry["server"] != req.server or req.tool not in entry["tools"]:
-            continue
-        for k, allowed in entry.get("constraints", {}).items():
-            if k not in req.arguments:
-                return "DENY", "CONSTRAINT_MISSING", k
-            if str(req.arguments[k]) not in set(map(str, allowed)):
-                return "DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
-        for pat in step_up_patterns:
-            if fnmatch.fnmatch(name, pat):
-                return "STEP_UP", "SENSITIVE_TOOL", pat
-        return "ALLOW", "IN_SCOPE", ""
-    return "DENY", "OUT_OF_SCOPE", name
+    for scope in scopes:
+        if refused := match_scope(req.server, req.tool, arguments, scope):
+            return "DENY", *refused
+    # only once scope has passed, so a volume refusal says nothing about data outside the mandate
+    if refused := volume.check_arguments(req.tool, arguments):
+        return "DENY", *refused
+    for pat in step_up_patterns:
+        if fnmatch.fnmatch(name, pat):
+            return "STEP_UP", "SENSITIVE_TOOL", pat
+    return "ALLOW", "IN_SCOPE", ""
+
+
+def clean_arguments(req: Request) -> dict:
+    """The arguments as they will be checked and forwarded."""
+    if req.tool != "get" or "path" not in req.arguments:
+        return req.arguments
+    path = paths.clean(req.arguments["path"])
+    if path is None:
+        raise Reject("PATH_NOT_ALLOWED", "write the file's path plainly, such as folder/file.csv")
+    return {**req.arguments, "path": path}
 
 
 # ---------------------------------------------------------------- the pipeline
 
 class Gateway:
-    def __init__(self, registry, status_lists: dict[str, str], step_up_patterns: list[str] | None = None):
+    def __init__(self, registry, status_lists: dict[str, str], step_up_patterns: list[str] | None = None,
+                 store: Store | None = None):
         self.registry = registry
         self.status_lists = status_lists
         self.step_up = step_up_patterns or ["*.write", "*.draft"]
-        self._seen_nonces: set[str] = set()
+        self.store = store or Store()
+
+    def verify(self, token: str) -> dict:
+        """Is this mandate good right now? Returns its claims, or raises Reject."""
+        try:
+            child = delegation.is_child(token)
+        except jwt.PyJWTError as e:
+            raise Reject("WRONG_TOKEN_TYPE", "not a readable mandate") from e
+        if child:
+            return delegation.verify_child(token, self._verify_root, self._helper_revoked)
+        claims = self._verify_root(token)
+        # last, so that a claim of the same name cannot stand in for these
+        return {**claims, "root": claims["jti"], "scopes": [claims["scope"]]}
+
+    def _verify_root(self, token: str) -> dict:
+        claims = verify_mandate(token, self.registry, self.status_lists)
+        return {**claims, "_kid": jwt.get_unverified_header(token).get("kid", "")}
+
+    def _helper_revoked(self, parent: dict, number: int) -> bool:
+        sl = parent["status"]["status_list"]
+        try:
+            return is_revoked(self.status_lists[sl["uri"]], number, self.registry.issuer_key(parent["iss"], parent["_kid"]),
+                              sl["uri"])
+        except (KeyError, ValueError) as e:
+            raise Reject("STATUS_UNAVAILABLE", "cannot tell if this helper was stopped", parent) from e
+
+    def check_scope(self, req: Request, claims: dict) -> tuple[str, str, str, dict]:
+        arguments = clean_arguments(req)
+        return *check_request(req, arguments, claims["scopes"], claims["deny"], self.step_up), arguments
 
     def decide(self, req: Request) -> Decision:
-        base = dict(policy_version=POLICY_VERSION, mandate_hash=sha256_hex(req.mandate.encode()),
-                    request_hash=sha256_hex(req.signing_input()), ts=time.time())
+        base = dict(policy_version=POLICY_VERSION, mandate_hash="", request_hash="", ts=time.time())
+        claims = None
         try:
-            claims = verify_mandate(req.mandate, self.registry, self.status_lists)
+            # inside the try: text that is not valid Unicode cannot be hashed
+            base.update(mandate_hash=sha256_hex(req.mandate.encode()), request_hash=sha256_hex(req.signing_input()))
+            claims = self.verify(req.mandate)
             jwk = claims["cnf"]["jwk"]
+            who = jwk_thumbprint(jwk)
             if abs(req.ts - time.time()) > 300:
                 raise Reject("POP_FAILED", "request timestamp outside window")
-            if req.nonce in self._seen_nonces:
-                raise Reject("POP_FAILED", "replayed nonce")
             if not verify_bytes(jwk_to_pub(jwk), req.signing_input(), req.sig):
-                raise Reject("POP_FAILED", f"bad signature for jkt {jwk_thumbprint(jwk)}")
-            self._seen_nonces.add(req.nonce)
+                raise Reject("POP_FAILED", f"bad signature for jkt {who}")
+            if not self.store.use_nonce(who, req.nonce):
+                raise Reject("POP_FAILED", "replayed nonce")
 
-            decision, code, detail = check_request(req, claims["scope"], claims["deny"], self.step_up)
-            return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base)
+            if req.server == OWN_SERVER:
+                if req.tool != "held" or not isinstance(req.arguments.get("id"), str):
+                    raise Reject("OUT_OF_SCOPE", "the gateway's own server has one tool: held(id)")
+                return Decision("ALLOW", "HELD_STATUS", agent_id=claims["agent_id"], claims=claims,
+                                arguments=req.arguments, **base)
+            decision, code, detail, arguments = self.check_scope(req, claims)
+            return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, claims=claims,
+                            arguments=arguments, **base)
         except Reject as r:
-            return Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)
+            return Decision("DENY", r.code, agent_id=None, detail=r.detail, claims=claims or r.claims, **base)
+        except Exception:
+            # fail closed: everything in a request is the caller's to choose, so what the checks cannot
+            # handle is refused, never a 500. Logged, because it may also be a bug in the checks.
+            log.exception("refused a request that could not be decided")
+            return Decision("DENY", "MALFORMED_REQUEST", agent_id=None, claims=claims, **base)

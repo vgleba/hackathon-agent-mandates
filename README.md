@@ -60,7 +60,15 @@ What we want at the end is what you found out: where agent mandates hold and whe
 3. Open **[questions/README.md](questions/README.md)**. It lists the questions, 0 to 16. Each starts with something the administrator asks.
 4. Read [gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py). It walks through the current verification process.
 
-Ports: MCP server `:8080`, gateway `:8082`, demo UI `localhost:8081/demo` (a walkthrough of issuing a mandate and making a call - feel free to extend, e.g - for human in the loop escalation.).
+**Desk**, for school staff: `uv run --no-sync python -m desk`, then open a sign-in link it prints. Give an assistant a job
+in plain words, approve what it asks, take it back, and see what it saw. **The lab**: `uv run --no-sync python -m lab`, then
+`http://127.0.0.1:8184`. The gateway before and after our changes, question by question. Neither needs Docker. What each
+question shows is in [docs/questions_4_to_16.md](docs/questions_4_to_16.md).
+
+The `/demo/*` routes sign mandates for anyone who asks, so they are off unless `GATEWAY_DEMO=1`. `docker-compose.yaml`
+sets it for the demo UI. **Remove that line before you deploy.**
+
+Ports: MCP server `:8080` (inside Docker only, it has no access control), gateway `:8082`, demo UI `localhost:8081/demo` (a walkthrough of issuing a mandate and making a call - feel free to extend, e.g - for human in the loop escalation.).
 `make test` and `make lint` run the tests and ruff. The data sources are listed in
 [mcp_server/data/synthetic/synthetic_manifest.json](mcp_server/data/synthetic/synthetic_manifest.json).
 
@@ -164,6 +172,22 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `DENIED_BY_RULE` | The tool matches a `deny` glob. Checked before scope |
 | `OUT_OF_SCOPE` | No scope entry lists the tool |
 | `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |
+| `LIMIT_NOT_ALLOWED` | `limit` on `search` or `get` is not a whole number from 1 to 100 |
+| `QUERY_TOO_BROAD` | A `search` that is blank, or that matches 90% or more of the records in its scope |
+| `MALFORMED_REQUEST` | The checks could not make sense of the request, so it is refused |
+| `PATH_NOT_ALLOWED` | A `path` written in a way that a server could read as another file |
+| `PERSON_UNKNOWN` / `PERSON_PAUSED` / `PERSON_LOST_ACCESS` | Who granted it is not in `people.json`, has left, or does not cover that school |
+| `PURPOSE_MISMATCH` / `CLEARANCE_TOO_LOW` | Not what `purpose_code` covers, or too sensitive for the mandate, its purpose or its person |
+| `UNSAFE_GROUPING` / `BUDGET_EXCEEDED` | A count that could single someone out, or more different pupils than the job or the person's day allows |
+| `CHILD_WIDER` / `CHILD_SIG_INVALID` / `DELEGATION_NOT_ALLOWED` | A helper's mandate is wider than its parent, not made by it, or was not allowed |
+| `TOO_MANY_WAITING` / `LABELS_UNAVAILABLE` / `RECORD_UNAVAILABLE` / `CLAIM_NOT_UNDERSTOOD` | Too many calls held, or something a decision needs is missing: refused |
+
+One `search` or `get` releases 10 different pupils at most. The reply's `volume` says how many, and whether the answer
+was cut short (`trimmed`). The limits are constants in [gateway/lib/volume.py](gateway/lib/volume.py).
+
+`gateway/state/people.json` lists who may grant access: their schools, clearance and daily limit, read on every call. `cli
+person` changes it, and a mandate from anyone else is refused. Every call is written to `gateway/state/record.jsonl` before
+anything is released; `cli log-anchor` prints its latest hash for somebody else to keep, and `cli log-check` checks it.
 
 
 ### Changing a mandate

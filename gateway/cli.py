@@ -18,15 +18,20 @@ Keys and mandates live in $GATEWAY_STATE_DIR (default gateway/state). It holds p
 import argparse
 import json
 import os
+import re
 import secrets
 import sys
 import time
 import urllib.request
+import uuid
 from pathlib import Path
+
+import jwt
 
 from gateway.lib.common import (
     b64u,
     b64u_decode,
+    canonical,
     generate_keypair,
     jwk_to_pub,
     priv_from_pem,
@@ -36,8 +41,10 @@ from gateway.lib.common import (
     pub_to_pem,
     sign_bytes,
 )
+from gateway.lib.delegation import CHILD_TYP
 from gateway.lib.gateway_verify import Request
 from gateway.lib.mandate_issuer import MandateIssuer
+from gateway.lib.record import check as check_record
 from gateway.lib.status_list import StatusListIssuer
 
 # search pupils of SCH01 only; get only the two files that hold no pupil data. Also the Day 2 attack mandate.
@@ -50,6 +57,32 @@ DEFAULT_SCOPE = [
     },
 ]
 DEFAULT_DENY = ["*.write", "pii.*"]
+# who may grant access, checked on every call (question 13). The eval and the default mandate use these two
+DEFAULT_PEOPLE = {
+    "officer:jsmith": {
+        "name": "J Smith",
+        "status": "active",
+        "urns": "*",
+        "clearance": 4,
+        "daily_pupils": 300,
+    },
+    "eval:runner": {"name": "Eval", "status": "active", "urns": "*", "clearance": 3, "daily_pupils": 300},
+}
+
+
+def replace_text(path: Path, text: str) -> None:
+    """All of the new text or all of the old, never half: the gateway reads these files on every request."""
+    new = path.with_name(f"{path.name}.{secrets.token_hex(4)}.new")
+    new.write_text(text, encoding="utf-8")
+    for attempt in range(50):
+        try:
+            new.replace(path)
+        except PermissionError:  # Windows, while somebody is reading it
+            if attempt == 49:  # noqa: PLR2004
+                raise
+            time.sleep(0.02)
+        else:
+            return
 
 
 def _load_status(state: Path) -> tuple[StatusListIssuer, dict]:
@@ -62,9 +95,17 @@ def _load_status(state: Path) -> tuple[StatusListIssuer, dict]:
 
 def _save_status(state: Path, issuer: StatusListIssuer, meta: dict) -> None:
     meta.update(next=issuer._next, bits_b64u=b64u(bytes(issuer.bits)))  # noqa: SLF001
-    (state / "status_list.json").write_text(json.dumps(meta, indent=2))
+    replace_text(state / "status_list.json", json.dumps(meta, indent=2))
     # a week: the gateway fails closed on a stale list and nothing republishes between CLI runs
-    (state / "status_list.jwt").write_text(issuer.publish(ttl=7 * 86400))
+    replace_text(state / "status_list.jwt", issuer.publish(ttl=7 * 86400))
+
+
+def load_people(state: Path) -> dict:
+    """Everyone who may grant access. Written with the defaults the first time, for a state made before it existed."""
+    path = state / "people.json"
+    if not path.exists():
+        replace_text(path, json.dumps(DEFAULT_PEOPLE, indent=2))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def load_or_create_key(path: Path):
@@ -98,9 +139,18 @@ def issue_mandate(
     principal: str,
     org: str,
     extra: dict | None = None,
+    helpers: int = 0,
 ) -> tuple[str, int]:
-    """Issue a mandate from the state dir's issuer key. Returns (jwt, status-list index)."""
+    """Issue a mandate from the state dir's issuer key. Returns (jwt, status-list index).
+
+    `helpers` sets aside that many revocation numbers, so the agent may hand part of this on and each can be stopped.
+    """
+    if principal not in load_people(state):
+        msg = f"{principal} is not in people.json. Add them first: cli person --principal {principal} --urns ..."
+        raise ValueError(msg)
     status, meta = _load_status(state)
+    if helpers:
+        extra = {**(extra or {}), "may_delegate": 1, "helpers": [status.allocate() for _ in range(helpers)]}
     idx = status._next  # noqa: SLF001
     token = MandateIssuer(meta["issuer"], meta["kid"], status.priv, status).issue(
         delegator={"principal": principal, "org": org, "authority": "hackathon"},
@@ -119,6 +169,44 @@ def revoke_mandate(state: Path, idx: int) -> None:
     status, meta = _load_status(state)
     status.revoke(idx)
     _save_status(state, status, meta)
+
+
+def delegate_mandate(parent: str, parent_priv, helper_pub, *, scope: list[dict], ttl: int, helper: int = 0) -> str:
+    """Hand part of a mandate on to a helper's key. Needs no issuer: the parent agent's own key signs it."""
+    claims = jwt.decode(parent, options={"verify_signature": False})
+    child = {
+        "jti": f"urn:uuid:{uuid.uuid4()}",
+        "exp": min(int(time.time()) + ttl, claims["exp"]),
+        "cnf": {"jwk": pub_to_jwk(helper_pub)},
+        "scope": scope,
+        "helper_idx": claims["helpers"][helper],
+        "parent": parent,
+    }
+    return jwt.encode(child, priv_to_pem(parent_priv), algorithm="EdDSA", headers={"typ": CHILD_TYP})
+
+
+def person_message(principal: str, do: str, nonce: str, ts: int, fields: dict) -> bytes:
+    """What a person signs with their own key. `do` is part of it, so a signature is good for one kind of thing."""
+    return canonical({"principal": principal, "do": do, "nonce": nonce, "ts": ts, "fields": fields})
+
+
+def sign_as_person(key, principal: str, do: str, **fields) -> dict:
+    nonce, ts = secrets.token_urlsafe(16), int(time.time())
+    sig = sign_bytes(key, person_message(principal, do, nonce, ts, fields))
+    return {"principal": principal, "nonce": nonce, "ts": ts, "sig": sig, **fields}
+
+
+def set_person(state: Path, principal: str, **fields) -> None:
+    people = load_people(state)
+    people[principal] = {**people.get(principal, {}), **fields}
+    replace_text(state / "people.json", json.dumps(people, indent=2))
+
+
+def person_key(state: Path, principal: str):
+    """A person's own key, kept apart from any agent's. In real use it stays on their own device."""
+    key = load_or_create_key(state / f"person_{re.sub(r'[^a-z0-9]+', '_', principal.lower())}.pem")
+    set_person(state, principal, jwk=pub_to_jwk(key.public_key()))
+    return key
 
 
 def sign_request(agent_priv, *, server: str, tool: str, arguments: dict, mandate: str) -> dict:
@@ -149,6 +237,8 @@ def cmd_init(a) -> None:
     (state / "trusted_list.json").write_text(json.dumps(trusted, indent=2))
     meta = {"issuer": a.issuer, "kid": a.kid, "uri": f"{a.issuer}/status/1", "next": 0, "bits_b64u": ""}
     _save_status(state, StatusListIssuer(a.issuer, meta["uri"], issuer_priv), meta)
+    load_people(state)
+    person_key(state, "officer:jsmith")
     print(f"initialised {state}")
 
 
@@ -163,12 +253,58 @@ def cmd_issue(a) -> None:
         principal=a.principal,
         org=a.org,
         extra=json.loads(a.claims),
+        helpers=a.helpers,
     )
     if a.out:
         a.out.write_text(token)
         print(f"wrote mandate (status idx {idx}) to {a.out}")
     else:
         print(token)
+
+
+def cmd_delegate(a) -> None:
+    token = delegate_mandate(
+        a.mandate.read_text().strip(),
+        priv_from_pem(a.agent_key.read_bytes()),
+        load_agent_pub(a.to),
+        scope=json.loads(a.scope),
+        ttl=a.ttl,
+        helper=a.helper,
+    )
+    a.out.write_text(token)
+    print(f"wrote a narrower mandate for the helper to {a.out}")
+
+
+def cmd_person(a) -> None:
+    given = {"name": a.name, "status": a.status, "clearance": a.clearance, "daily_pupils": a.daily_pupils}
+    given["successor"] = a.successor
+    if a.urns:
+        given["urns"] = "*" if a.urns == "*" else a.urns.split(",")
+    if a.principal not in load_people(a.state):  # missing means least
+        given = {"status": "active", "urns": [], "clearance": 1, "daily_pupils": 0} | {
+            k: v for k, v in given.items() if v is not None
+        }
+    set_person(a.state, a.principal, **{k: v for k, v in given.items() if v is not None})
+    if a.key:
+        person_key(a.state, a.principal)
+    print(json.dumps({a.principal: load_people(a.state)[a.principal]}, indent=2))
+
+
+def cmd_log_anchor(a) -> None:
+    lines = (a.state / "record.jsonl").read_text(encoding="utf-8").splitlines()
+    last = json.loads(lines[-1])
+    print(f"{last['seq']}:{last['hash']}")
+
+
+def cmd_log_check(a) -> None:
+    anchor = None
+    if a.anchor:
+        seq, hashed = a.anchor.split(":", 1)
+        anchor = (int(seq), hashed)
+    found = check_record(a.state / "record.jsonl", pub_from_pem((a.state / "gateway.pub").read_bytes()), anchor)
+    if found != "ok":
+        sys.exit(found)
+    print(found)
 
 
 def cmd_keygen(a) -> None:
@@ -214,7 +350,7 @@ def cmd_call(a) -> None:
     print(json.dumps(json.loads(text), indent=2))
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915  (one block per command)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--state",
@@ -247,8 +383,39 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--principal", default="officer:jsmith", help="the person handing over access")
     s.add_argument("--org", default="school:SCH01", help="who that person acts for")
     s.add_argument("--claims", default="{}", help="claims of your own to sign in, e.g. '{\"clearance\": 2}' (JSON)")
+    s.add_argument("--helpers", type=int, default=0, help="how many helpers the agent may hand part of this on to")
     s.add_argument("-o", "--out", type=Path, help="file to write to (default: print it)")
     s.set_defaults(fn=cmd_issue)
+
+    s = sub.add_parser("delegate", help="agent: hand part of your mandate on to a helper, narrower")
+    s.add_argument("--mandate", type=Path, required=True, help="your own mandate, issued with --helpers")
+    s.add_argument("--agent-key", type=Path, required=True, help="your own private key")
+    s.add_argument("--to", type=Path, required=True, help="the helper's public key (JWK or PEM)")
+    s.add_argument("--scope", required=True, help="the part to hand on (JSON)")
+    s.add_argument("--ttl", type=int, default=900, help="seconds until it expires, never later than your own")
+    s.add_argument("--helper", type=int, default=0, help="which of the helpers set aside for you: 0, 1, ...")
+    s.add_argument("-o", "--out", type=Path, required=True, help="file to write to")
+    s.set_defaults(fn=cmd_delegate)
+
+    s = sub.add_parser("person", help="add or change someone who may grant access; takes effect on the next call")
+    s.add_argument("--principal", required=True, help="their id, e.g. officer:priya")
+    s.add_argument("--name", help="their name")
+    s.add_argument("--status", choices=["active", "away", "left"], help="anything but active pauses all their agents")
+    s.add_argument("--urns", help="schools they cover, e.g. SCH04,SCH05, or * for all")
+    s.add_argument("--clearance", type=int, choices=[1, 2, 3, 4], help="the most sensitive data they may see")
+    s.add_argument("--daily-pupils", type=int, help="different pupils their agents may see in a day")
+    s.add_argument("--successor", help="who may start their jobs afresh when they leave")
+    s.add_argument(
+        "--key", action="store_true", help="make them a key of their own, to approve and read their log with"
+    )
+    s.set_defaults(fn=cmd_person)
+
+    s = sub.add_parser("log-anchor", help="print the latest entry's number and hash, for somebody else to keep")
+    s.set_defaults(fn=cmd_log_anchor)
+
+    s = sub.add_parser("log-check", help="check that the record has not been changed, or cut off since an anchor")
+    s.add_argument("--anchor", help="what log-anchor printed earlier")
+    s.set_defaults(fn=cmd_log_check)
 
     s = sub.add_parser("revoke", help="cancel a mandate; takes effect on the next call")
     s.add_argument("--idx", type=int, required=True, help="number printed when it was issued")

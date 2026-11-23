@@ -7,8 +7,9 @@ services:
     volumes:
       - ./mcp_server/data:/app/mcp_server/data
     container_name: mcp-backend
-    ports:
-      - "8080:8080"
+    # not published: it has no access control, so only the gateway may reach it
+    expose:
+      - "8080"
     env_file:
       - .env
     healthcheck:
@@ -53,6 +54,8 @@ services:
     environment:
       - MCP_SERVERS=pupil-data=http://backend:8080/mcp/
       - GATEWAY_STATE_DIR=/app/gateway/state
+      # local only: /demo/* signs mandates for anyone who asks. Remove this line when you deploy
+      - GATEWAY_DEMO=1
       - LITELLM_KEY=${LITELLM_KEY:-}
       - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
     healthcheck:
