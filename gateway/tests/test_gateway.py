@@ -53,6 +53,17 @@ def test_allow_deny_replay_revoke(gw):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
 
 
+def test_issue_warns_when_entries_for_one_tool_constrain_different_arguments():
+    def entry(**constraints):
+        return {"server": "pupil-data", "tools": ["pupil"], "constraints": constraints}
+
+    assert cli.scope_warnings(cli.DEFAULT_SCOPE) == []
+    assert cli.scope_warnings(ev.TWO_SCHOOLS_SCOPE) == []  # same argument in both entries: a plain second grant
+    (warning,) = cli.scope_warnings([entry(urn=["SCH01"]), entry(pupil_id=["P0011"])])
+    assert "pupil-data.pupil" in warning
+    assert len(cli.scope_warnings([entry(urn=["SCH01"]), entry()])) == 1  # an unconstrained entry beside a narrow one
+
+
 def test_tampered_mandate_is_denied(gw):
     client, call, state = gw
     mandate = (state / "mandate.jwt").read_text()

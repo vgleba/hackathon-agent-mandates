@@ -137,6 +137,22 @@ def load_agent_pub(path: Path):
     return pub_from_pem(raw)
 
 
+def scope_warnings(scope: list[dict]) -> list[str]:
+    """Scope entries add up: the gateway allows a call if any one entry accepts it, and an entry only restricts
+    the arguments it names. Entries for one tool that constrain different arguments are usually a mistake."""
+    seen: dict[tuple[str, str], set[frozenset]] = {}
+    for entry in scope:
+        for tool in entry["tools"]:
+            seen.setdefault((entry["server"], tool), set()).add(frozenset(entry.get("constraints", {})))
+    return [
+        f"warning: {server}.{tool} has entries constraining different arguments "
+        f"({', '.join(str(sorted(k)) for k in sorted(keys, key=sorted))}); each entry is a separate grant, "
+        "so the tool is as wide as its loosest entry"
+        for (server, tool), keys in seen.items()
+        if len(keys) > 1
+    ]
+
+
 def issue_mandate(
     state: Path,
     agent_pub,
@@ -154,6 +170,8 @@ def issue_mandate(
 
     `helpers` sets aside that many revocation numbers, so the agent may hand part of this on and each can be stopped.
     """
+    for warning in scope_warnings(scope):
+        print(warning, file=sys.stderr)
     if principal not in load_people(state):
         msg = f"{principal} is not in people.json. Add them first: cli person --principal {principal} --urns ..."
         raise ValueError(msg)
