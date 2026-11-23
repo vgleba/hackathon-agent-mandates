@@ -189,6 +189,56 @@ def test_revoking_while_calls_are_being_made_never_breaks_them(gw):
         t.join()
 
 
+def half(text: str, _issuer) -> str:
+    """What a read through a container's shared folder can return while the file is being replaced."""
+    return text[: len(text) // 2]
+
+
+def signed_list(text: str, issuer, **status) -> str:
+    """The real list signed again by its issuer, with the list itself replaced: genuine, but not readable."""
+    claims = {k: v for k, v in jwt.decode(text, options={"verify_signature": False}).items() if k != "status_list"}
+    return jwt.encode({**claims, **status}, priv_to_pem(issuer), algorithm="EdDSA", headers={"typ": "statuslist+jwt"})
+
+
+def test_a_status_list_read_half_written_is_read_again(gw, monkeypatch):
+    client, key, mandate, state = gw
+    cli.revoke_mandate(state, jwt.decode(mandate, options={"verify_signature": False})["status"]["status_list"]["idx"])
+    real, torn = Path.read_text, iter([True] * 3)
+
+    def read_text(self, *a, **k):
+        text = real(self, *a, **k)
+        return half(text, None) if self.name == "status_list.jwt" and next(torn, False) else text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    r = good_call(client, key, mandate)
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        pytest.param(half, id="cut in half"),
+        pytest.param(lambda text, _: text + "x", id="one character too many"),
+        pytest.param(lambda text, _: text[:-3] + "AAA", id="signature does not match"),
+        pytest.param(lambda _, __: "a.b.c", id="not a token"),
+        pytest.param(
+            lambda text, issuer: signed_list(text, issuer, status_list={"bits": 1, "lst": "bm90LXpsaWI"}),
+            id="signed, but the list is not compressed",
+        ),
+        pytest.param(signed_list, id="signed, but no list in it"),
+    ],
+)
+def test_a_status_list_that_stays_unreadable_is_refused_in_the_persons_name(gw, spoil):
+    # refused either way; this is about the record: the person must see that their access was tried
+    client, key, mandate, state = gw
+    path, issuer = state / "status_list.jwt", priv_from_pem((state / "issuer_key.pem").read_bytes())
+    path.write_text(spoil(path.read_text(), issuer))
+    r = good_call(client, key, mandate)
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "STATUS_UNAVAILABLE")
+    last = json.loads((state / "record.jsonl").read_text().splitlines()[-1])
+    assert (last["principal"], last["reason"]) == ("officer:jsmith", "STATUS_UNAVAILABLE")
+
+
 # ------------------------------------------------------------ the demo routes sign for anyone who asks
 
 DEMO_ROUTES = [

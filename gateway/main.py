@@ -11,10 +11,12 @@ import logging
 import os
 import re
 import time
+import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import jwt
 from fastapi import FastAPI
 from fastapi import Request as HttpRequest
 from fastapi.exceptions import RequestValidationError
@@ -26,7 +28,7 @@ from pydantic import BaseModel
 from gateway.cli import person_message, sign_request
 from gateway.lib import disclosure, policy, volume
 from gateway.lib import record as records
-from gateway.lib.common import generate_keypair, jwk_to_pub, priv_from_pem, pub_to_jwk, verify_bytes
+from gateway.lib.common import b64u_decode, generate_keypair, jwk_to_pub, priv_from_pem, pub_to_jwk, verify_bytes
 from gateway.lib.errors import Reject
 from gateway.lib.gateway_verify import OWN_SERVER, Decision, Gateway, Request
 from gateway.lib.record import NOBODY, Record, safe_arguments, safe_text
@@ -137,11 +139,34 @@ def read_shared(name: str) -> str:
     return (state["dir"] / name).read_text(encoding="utf-8")
 
 
+def whole_status_list(text: str) -> bool:
+    """Does this read look like a whole status list? Checked without the issuer's key, which is_revoked uses after.
+
+    Read through a container's shared folder while `cli revoke` is replacing the file, the text can come back cut
+    short or mixed for a moment, even though the replacement itself is atomic.
+    """
+    try:
+        claims = jwt.decode(text, options={"verify_signature": False})
+        zlib.decompress(b64u_decode(claims["status_list"]["lst"]))
+    except Exception:  # noqa: BLE001  (anything that does not decode is not whole)
+        return False
+    return True
+
+
 def refresh_revocations() -> None:
-    """Re-read on every request, so `cli revoke` applies without a restart. Unreadable means unknown, so refused."""
+    """Re-read on every request, so `cli revoke` applies without a restart. Unreadable means unknown, so refused.
+
+    A read that is not whole is tried again. If it never is, the last read is kept anyway: is_revoked refuses it.
+    """
     lists = state["gateway"].status_lists
     try:
-        lists[state["status_uri"]] = read_shared("status_list.jwt").strip()
+        for attempt in range(READ_TRIES):
+            text = read_shared("status_list.jwt").strip()
+            if whole_status_list(text):
+                break
+            if attempt < READ_TRIES - 1:
+                time.sleep(0.01)
+        lists[state["status_uri"]] = text
     except OSError:
         log.exception("the revocation list cannot be read")
         lists.pop(state["status_uri"], None)

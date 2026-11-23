@@ -50,7 +50,20 @@ class StatusListIssuer:
 
 
 def is_revoked(status_list_jwt: str, idx: int, issuer_pub, expected_uri: str) -> bool:
-    """Raises on a malformed/forged list (fail closed); returns True if bit idx is set."""
+    """Returns True if bit idx is set. Raises ValueError on a malformed, forged or stale list (fail closed).
+
+    Only ValueError, whatever went wrong inside: the gateway turns it into STATUS_UNAVAILABLE and keeps the mandate's
+    person on the refusal, where any other exception would be an unattributed MALFORMED_REQUEST.
+    """
+    try:
+        return _read_bit(status_list_jwt, idx, issuer_pub, expected_uri)
+    except ValueError:
+        raise
+    except (jwt.PyJWTError, zlib.error, KeyError, TypeError, AttributeError) as e:
+        raise ValueError(f"unreadable status list: {type(e).__name__}") from e
+
+
+def _read_bit(status_list_jwt: str, idx: int, issuer_pub, expected_uri: str) -> bool:
     hdr = jwt.get_unverified_header(status_list_jwt)
     if hdr.get("typ") != "statuslist+jwt":
         raise ValueError("not a status list token")
