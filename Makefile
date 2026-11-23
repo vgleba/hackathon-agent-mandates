@@ -40,6 +40,9 @@ eval_build:  ## Mint the eval mandates + keys from gateway/state into eval_pack/
 eval_run:  ## Fire the eval cases for questions 0 to 5 at GATEWAY_URL (default localhost:8082)
 	uv run python -m gateway.eval run --pack eval_pack --url $${GATEWAY_URL:-http://localhost:8082}
 
+eval_open:  ## Fire our cases for open questions 7, 10, 11 and 14 at GATEWAY_URL; mints and revokes mandates in gateway/state
+	uv run python -m gateway.eval open --url $${GATEWAY_URL:-http://localhost:8082}
+
 attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if FEATURE_SCOPE/FEATURE_CLAIMS are set, to each day_2_attack/keys/<team>.jwk
 	mkdir -p day_2_attack/keys day_2_attack/mandates
 	for key in day_2_attack/keys/*.jwk; do \

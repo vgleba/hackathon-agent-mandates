@@ -2,8 +2,10 @@
 
     python -m gateway.eval build -o eval_pack            # organiser: mint the mandates + keys from gateway/state
     python -m gateway.eval run --pack eval_pack --url http://localhost:8082
+    python -m gateway.eval open --state gateway/state --url http://localhost:8082   # our open questions
 
-The pack holds no issuer key, so teams can hold it and run the eval against their own gateway.
+The pack holds no issuer key, so teams can hold it and run the eval against their own gateway. `open` is different:
+it mints from the issuer key and pins our own design for questions 7, 10, 11 and 14 (gateway/eval_open.py).
 """
 
 import argparse
@@ -221,6 +223,15 @@ def cmd_run(a) -> None:
     sys.exit(code)
 
 
+def cmd_open(a) -> None:
+    from gateway import eval_open  # noqa: PLC0415  (eval_open imports this module)
+
+    results = eval_open.run_open(a.state, *eval_open.http(a.url))
+    code = report(results)
+    eval_open.question_summary(results)
+    sys.exit(code)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -233,6 +244,10 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--pack", type=Path, default=Path("eval_pack"))
     s.add_argument("--url", default="http://localhost:8082")
     s.set_defaults(fn=cmd_run)
+    s = sub.add_parser("open", help="fire our cases for open questions 7, 10, 11 and 14; mints from the issuer state")
+    s.add_argument("--state", type=Path, default=Path(os.environ.get("GATEWAY_STATE_DIR", "gateway/state")))
+    s.add_argument("--url", default="http://localhost:8082")
+    s.set_defaults(fn=cmd_open)
     a = p.parse_args(argv)
     a.fn(a)
 

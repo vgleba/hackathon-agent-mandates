@@ -3,7 +3,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from gateway import cli, main
+from gateway import cli, eval_open, main
 from gateway import eval as ev
 from gateway.lib.common import priv_from_pem
 from gateway.lib.errors import Reject
@@ -161,6 +161,24 @@ def test_eval_set_passes(gw, tmp_path):
     # questions 0 to 2 came working; 3 to 5 are fixed in check_request, so every case must pass
     assert [line for ok, line in results if not ok] == []
     assert len(results) == len(ev.VALID) + len(ev.INVALID) + len(ev.BUILD)
+
+
+def test_open_evals_run_to_the_end(gw):
+    """The open-question evals pin a design that is not built yet, so this checks the harness, not the gateway: every
+    question gets cases and nothing crashes on the way."""
+    client, _, state = gw
+
+    def post(body):
+        r = client.post("/tools/call", json=body)
+        return r.status_code, r.json()
+
+    def get(path, headers):
+        r = client.get(path, headers=headers)
+        return r.status_code, r.json() if r.headers.get("content-type") == "application/json" else {}
+
+    results = eval_open.run_open(state, post, get)
+    assert {line.split()[0] for _, line in results} == {f"Q{q}" for q in eval_open.OPEN_QUESTIONS}
+    assert len(eval_open.year11(eval_open.census(), eval_open.ELMWOOD)) < eval_open.MAX_PUPILS
 
 
 SCH01_SEARCH = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
