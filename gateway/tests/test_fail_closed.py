@@ -1,5 +1,6 @@
 """Questions 1 and 2 only hold if nobody can crash the checks or have the gateway sign a mandate for them."""
 
+import base64
 import json
 import threading
 import time
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from gateway import cli, main
 from gateway.lib.common import priv_from_pem, priv_to_pem
+from gateway.lib.gateway_verify import MAX_DETAIL
 from mcp_server.api.routes_mcp import mcp
 
 
@@ -74,6 +76,37 @@ def test_genuinely_signed_mandate_missing_its_status_claim_is_refused(gw):
     )
     r = client.post("/tools/call", json=body_for(token))
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "MALFORMED_REQUEST")
+
+
+def unsigned(header: dict, claims: dict) -> str:
+    """A token nobody signed. Its header and claims are read before any signature is checked."""
+
+    def part(obj) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    return f"{part(header)}.{part(claims)}.AAAA"
+
+
+BROKEN = chr(0xD800)  # half of a character: valid inside JSON as an escape, impossible to send back as UTF-8
+MANDATE = {"typ": "mandate+jwt", "alg": "EdDSA"}
+
+
+@pytest.mark.parametrize(
+    ("header", "claims", "reason"),
+    [
+        ({"typ": BROKEN, "alg": "EdDSA"}, {"iss": "x"}, "WRONG_TOKEN_TYPE"),
+        ({"typ": {"a": [BROKEN]}, "alg": "EdDSA"}, {"iss": "x"}, "WRONG_TOKEN_TYPE"),
+        (MANDATE, {"iss": BROKEN}, "ISSUER_NOT_ACCREDITED"),
+        (MANDATE, {"iss": BROKEN * 5000}, "ISSUER_NOT_ACCREDITED"),
+        (MANDATE, {"iss": "x" * 5000}, "ISSUER_NOT_ACCREDITED"),
+    ],
+)
+def test_text_from_an_unsigned_token_cannot_break_the_refusal(gw, header, claims, reason):
+    # the reason for a refusal repeats the token's own typ or iss: it has to be something that can be sent
+    client, *_ = gw
+    r = client.post("/tools/call", json=body_for(unsigned(header, claims)))
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, reason)
+    assert len(r.json()["decision"]["detail"]) <= MAX_DETAIL + len("...")
 
 
 @pytest.mark.parametrize("ts", [10**400, -(10**400), 2**63])
@@ -211,6 +244,28 @@ def test_demo_routes_are_off_unless_switched_on(gw, monkeypatch, setting, route)
     assert client.request(method, path, json=body).status_code == 404
     assert (state / "status_list.json").read_text() == before  # nothing minted, nothing revoked
     assert not (state / "demo_mandate.jwt").exists()
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"method": "POST", "url": "/demo/call", "json": {"tool": 5}},  # a body the route would not accept
+        {"method": "POST", "url": "/demo/call", "content": b"{", "headers": {"content-type": "application/json"}},
+        {"method": "GET", "url": "/demo/mandate"},  # a method the route does not have
+        {"method": "GET", "url": "/demo"},
+    ],
+    ids=["wrong body", "not JSON", "wrong method", "bare prefix"],
+)
+def test_a_demo_route_that_is_off_looks_like_no_route_at_all(gw, request_):
+    client, *_ = gw
+    nothing_there = client.get("/no/such/path")
+    r = client.request(**request_)
+    assert (r.status_code, r.json()) == (404, nothing_there.json())
+
+
+def test_demo_routes_are_not_listed(gw):
+    client, *_ = gw
+    assert [path for path in client.get("/openapi.json").json()["paths"] if path.startswith("/demo")] == []
 
 
 def test_demo_routes_work_when_switched_on(gw, monkeypatch):

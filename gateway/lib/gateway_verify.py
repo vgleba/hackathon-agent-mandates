@@ -22,11 +22,13 @@ import jwt
 from . import delegation, paths, volume
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from .errors import Reject
+from .record import safe_text
 from .status_list import is_revoked
 from .store import Store
 
 POLICY_VERSION = "2026-11-23.3"
 CLOCK_SKEW = 30
+MAX_DETAIL = 200         # characters of `detail` sent back with a decision
 OWN_SERVER = "gateway"   # where an agent asks after a call that is waiting for a person
 log = logging.getLogger(__name__)
 
@@ -46,7 +48,11 @@ class Decision:
     arguments: dict | None = field(default=None, repr=False)   # as checked, which is what gets forwarded
 
     def to_dict(self) -> dict:
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("claims", "arguments")}
+        """What the agent is sent. `detail` can repeat text the caller chose, such as the `typ` or `iss` of a token
+        nobody signed, so it is made safe to encode and kept short: otherwise a refusal becomes a 500."""
+        out = {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("claims", "arguments")}
+        out["detail"] = safe_text(str(out["detail"] or ""), MAX_DETAIL)
+        return out
 
 
 @dataclass

@@ -589,6 +589,21 @@ async def tools_call(body: CallBody, http: HttpRequest):
     return JSONResponse(reply, status_code=status)
 
 
-from gateway.demo import router as demo_router  # noqa: E402  (demo imports main lazily)
+from gateway.demo import demo_enabled  # noqa: E402  (demo imports main lazily)
+from gateway.demo import router as demo_router  # noqa: E402
+
+
+@app.middleware("http")
+async def demo_off_means_absent(request: HttpRequest, call_next):
+    """With the demo off, /demo/* answers exactly as a path that does not exist, for any method and any body.
+
+    The router's own check runs after the body has been read as JSON, so a body that is not JSON got a 422, which
+    told a caller the route was there.
+    """
+    path = request.url.path
+    if (path == "/demo" or path.startswith("/demo/")) and not demo_enabled():
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
 
 app.include_router(demo_router)

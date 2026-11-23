@@ -15,13 +15,18 @@ from gateway.cli import issue_mandate, load_or_create_key, revoke_mandate, sign_
 from gateway.lib.gateway_verify import Request
 
 
+def demo_enabled() -> bool:
+    return os.environ.get("GATEWAY_DEMO") == "1"
+
+
 def require_demo() -> None:
     """These routes sign with the issuer's and the agent's keys for whoever asks, so they are off by default."""
-    if os.environ.get("GATEWAY_DEMO") != "1":
+    if not demo_enabled():
         raise HTTPException(404, "Not Found")
 
 
-router = APIRouter(prefix="/demo", tags=["demo"], dependencies=[Depends(require_demo)])
+# not listed in /openapi.json: a gateway with the demo off should not say that it has one
+router = APIRouter(prefix="/demo", tags=["demo"], dependencies=[Depends(require_demo)], include_in_schema=False)
 
 
 def _gw():
