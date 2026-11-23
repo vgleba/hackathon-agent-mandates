@@ -3,7 +3,8 @@
     receive (request, mandate)
       -> verify mandate: issuer accredited / signature / time / revocation
       -> verify proof of possession (request signed by cnf key, fresh nonce and ts)
-      -> check request against scope, deny and constraints
+      -> check request against deny, then scope: any one entry must accept the
+         whole call (constraints, then how many rows it may return)
       -> decision record {ALLOW | DENY | STEP_UP, reason_code, ...}
 
 Reason codes are stable strings so the audit log and Day 2 scorecard can
@@ -24,7 +25,7 @@ from .errors import Reject
 from .status_list import is_revoked
 from .store import Store
 
-POLICY_VERSION = "2026-11-23.2"
+POLICY_VERSION = "2026-11-23.3"
 CLOCK_SKEW = 30
 OWN_SERVER = "gateway"   # where an agent asks after a call that is waiting for a person
 log = logging.getLogger(__name__)
@@ -129,16 +130,35 @@ def _failures(arguments: dict, constraints: dict) -> list[tuple[str, str]]:
     return found
 
 
+def _over_max_rows(tool: str, arguments: dict, entry: dict) -> tuple[str, str] | None:
+    """Question 3: a scope entry may set `max_rows`, the most rows one call under it may ask for. It can only lower
+    the gateway's own limit (volume.MAX_LIMIT), which a call that leaves `limit` out gets. A `limit` that is not a
+    whole number in range is refused by volume.check_arguments, after scope."""
+    if tool not in volume.GOVERNED_TOOLS or "max_rows" not in entry:
+        return None
+    cap = entry["max_rows"]
+    if type(cap) is not int or cap < 1:
+        return "CLAIM_NOT_UNDERSTOOD", f"max_rows must be a whole number of at least 1, not {cap!r}"
+    limit = arguments.get("limit", volume.MAX_LIMIT)
+    if type(limit) is int and limit > cap:
+        shown = "limit" if "limit" in arguments else f"default limit {volume.MAX_LIMIT}"
+        return "LIMIT_EXCEEDED", f"{shown}={limit} > max_rows {cap}"
+    return None
+
+
 def match_scope(server: str, tool: str, arguments: dict, scope: list[dict]) -> tuple[str, str] | None:
     """None if any one entry accepts the whole call, else the reason from the entry that came closest.
 
-    Each entry is judged alone: a call can never take its school from one entry and its file from another.
+    Each entry is judged alone: a call can never take its school from one entry and its file from another, nor its
+    school from one entry and its row cap from another.
     """
     closest = None
     for entry in scope:
         if entry["server"] != server or tool not in entry["tools"]:
             continue
         found = _failures(arguments, entry.get("constraints", {}))
+        if not found and (over := _over_max_rows(tool, arguments, entry)):
+            found = [over]
         if not found:
             return None
         if closest is None or len(found) < len(closest):

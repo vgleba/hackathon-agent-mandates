@@ -159,6 +159,12 @@ The starter gateway checks a request in this order
 3. The scope: is the tool on a deny rule, is it in scope, and does every constrained argument have an allowed
    value?
 
+Since questions 3 to 5 were fixed, step 3 also asks how much: a `search` needs a non-blank `query`, and a `limit` on
+`search` or `get` (100 when left out) must be a whole number from 1 to 100, and no higher than the scope entry's
+`max_rows` when it sets one. A `path` is cleaned before it is compared and forwarded (`./a` and `a//b` mean `a`);
+one with `..`, a leading `/` or anything a server could read as another file is refused. A mandate with several
+entries for one tool allows the call if any one entry accepts all of it.
+
 Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or `403 DENY`, with a `reason_code`:
 
 | `reason_code` | Meaning |
@@ -173,6 +179,7 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `OUT_OF_SCOPE` | No scope entry lists the tool |
 | `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |
 | `LIMIT_NOT_ALLOWED` | `limit` on `search` or `get` is not a whole number from 1 to 100 |
+| `LIMIT_EXCEEDED` | `limit` (or the 100 a call gets when it leaves `limit` out) is above the scope entry's `max_rows` |
 | `QUERY_TOO_BROAD` | A `search` that is blank, or that matches 90% or more of the records in its scope |
 | `MALFORMED_REQUEST` | The checks could not make sense of the request, so it is refused |
 | `PATH_NOT_ALLOWED` | A `path` written in a way that a server could read as another file |
