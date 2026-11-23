@@ -163,22 +163,17 @@ def test_eval_set_passes(gw, tmp_path):
     assert len(results) == len(ev.VALID) + len(ev.INVALID) + len(ev.BUILD)
 
 
-def test_open_evals_run_to_the_end(gw):
-    """The open-question evals pin a design that is not built yet, so this checks the harness, not the gateway: every
-    question gets cases and nothing crashes on the way."""
+def test_open_evals_pass(gw):
+    """make eval_open, in-process: every case for questions 7, 10, 11 and 14 holds against this gateway."""
     client, _, state = gw
 
-    def post(body):
-        r = client.post("/tools/call", json=body)
+    def post(path, body):
+        r = client.post(path, json=body)
         return r.status_code, r.json()
 
-    def get(path, headers):
-        r = client.get(path, headers=headers)
-        return r.status_code, r.json() if r.headers.get("content-type") == "application/json" else {}
-
-    results = eval_open.run_open(state, post, get)
+    results = eval_open.run_open(state, post)
     assert {line.split()[0] for _, line in results} == {f"Q{q}" for q in eval_open.OPEN_QUESTIONS}
-    assert len(eval_open.year11(eval_open.census(), eval_open.ELMWOOD)) < eval_open.MAX_PUPILS
+    assert [line for ok, line in results if not ok] == []
 
 
 SCH01_SEARCH = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}

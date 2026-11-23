@@ -2,10 +2,11 @@
 
     python -m gateway.eval build -o eval_pack            # organiser: mint the mandates + keys from gateway/state
     python -m gateway.eval run --pack eval_pack --url http://localhost:8082
-    python -m gateway.eval open --state gateway/state --url http://localhost:8082   # our open questions
+    python -m gateway.eval open --state gateway/state --url http://localhost:8082   # open questions 7, 10, 11, 14
 
 The pack holds no issuer key, so teams can hold it and run the eval against their own gateway. `open` is different:
-it mints from the issuer key and pins our own design for questions 7, 10, 11 and 14 (gateway/eval_open.py).
+it mints from the issuer key and checks this gateway's own design for questions 7, 10, 11 and 14
+(gateway/eval_open.py, docs/questions_4_to_16.md).
 """
 
 import argparse
@@ -224,9 +225,9 @@ def cmd_run(a) -> None:
 
 
 def cmd_open(a) -> None:
-    from gateway import eval_open  # noqa: PLC0415  (eval_open imports this module)
+    from gateway import eval_open  # noqa: PLC0415  (it imports desk, which build and run do not need)
 
-    results = eval_open.run_open(a.state, *eval_open.http(a.url))
+    results = eval_open.run_open(a.state, eval_open.http(a.url))
     code = report(results)
     eval_open.question_summary(results)
     sys.exit(code)
