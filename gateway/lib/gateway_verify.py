@@ -3,7 +3,8 @@
     receive (request, mandate)
       -> verify mandate: issuer accredited / signature / time / revocation
       -> verify proof of possession (request signed by cnf key, fresh nonce and ts)
-      -> check request against scope, deny and constraints
+      -> check request against deny, then scope: any one entry must accept the
+         whole call (constraints, then how many rows it may return)
       -> decision record {ALLOW | DENY | STEP_UP, reason_code, ...}
 
 Reason codes are stable strings so the audit log and Day 2 scorecard can
@@ -12,6 +13,7 @@ count them. Order of checks is deliberate: cheapest and most definitive first.
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 import time
 from dataclasses import asdict, dataclass
 
@@ -20,8 +22,21 @@ import jwt
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from .status_list import is_revoked
 
-POLICY_VERSION = "2026-11-18.1"
+POLICY_VERSION = "2026-11-23.1"
 CLOCK_SKEW = 30
+
+# Question 3: how much one call may return. Tools that take a `limit`, with the default the server applies when the
+# request leaves it out. A scope entry may set its own `max_rows`; without one, DEFAULT_MAX_ROWS applies.
+ROW_LIMITED_TOOLS = {"pupil-data.search": 100, "pupil-data.get": 100}
+DEFAULT_MAX_ROWS = 100
+# Question 3: arguments that pick rows by substring. A blank one matches every row.
+SELECTOR_ARGS = {"pupil-data.search": "query"}
+# Question 4: arguments that name a file, compared by the file they name rather than by spelling.
+PATH_ARGS = {"path"}
+# When no entry accepts a call, report the entry that came closest: one that failed only on volume beats one that
+# failed on a value, which beats one that was missing an argument.
+_MISS_RANK = {"QUERY_TOO_BROAD": 0, "LIMIT_EXCEEDED": 0, "LIMIT_INVALID": 0, "CONSTRAINT_VIOLATED": 1,
+              "CONSTRAINT_MISSING": 2}
 
 
 class Reject(Exception):
@@ -101,24 +116,85 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
 
 # ---------------------------------------------------------------- scope
 
+def normalise_path(value: object) -> str | None:
+    """Question 4: one spelling per file. `./a/b`, `a//b` and `a/x/../b` all become `a/b`.
+
+    Returns None for anything that is not a plain relative path inside the data directory: not a string, empty,
+    absolute, or still climbing out with `..` after normalising. The MCP server opens `(DATA_ROOT / path).resolve()`,
+    which names the same file as `DATA_ROOT / normalise_path(path)` as long as the data directory holds no symlinks.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    path = posixpath.normpath(value)
+    if path.startswith("/") or path == ".." or path.startswith("../"):
+        return None
+    return path
+
+
+def _value_allowed(key: str, value: object, allowed: list) -> bool:
+    if key in PATH_ARGS:
+        path = normalise_path(value)
+        return path is not None and path in {normalise_path(a) for a in allowed}
+    return str(value) in set(map(str, allowed))
+
+
+def _volume_refusal(name: str, arguments: dict, entry: dict) -> tuple[str, str] | None:
+    """Question 3: the right school is not enough. Refuse a call that selects every row, or asks for more rows than
+    the entry allows. Returns (reason_code, detail), or None if the call is within bounds."""
+    selector = SELECTOR_ARGS.get(name)
+    if selector is not None:
+        query = arguments.get(selector)
+        if not isinstance(query, str) or not query.strip():
+            return "QUERY_TOO_BROAD", f"{selector}={query!r} matches every row"
+    server_default = ROW_LIMITED_TOOLS.get(name)
+    if server_default is not None:
+        cap = entry.get("max_rows", DEFAULT_MAX_ROWS)
+        if type(cap) is not int:
+            return "LIMIT_INVALID", f"mandate max_rows={cap!r}"
+        limit = arguments.get("limit", server_default)
+        # Only a real int: the server coerces "1000" and 1000.0 to 1000 and True to 1, so comparing anything else
+        # would mean comparing a different number from the one the server uses.
+        if type(limit) is not int or limit < 1:
+            return "LIMIT_INVALID", f"limit={limit!r}"
+        if limit > cap:
+            shown = "limit" if "limit" in arguments else f"default limit {server_default}"
+            return "LIMIT_EXCEEDED", f"{shown}={limit} > max_rows {cap}"
+    return None
+
+
+def _entry_refusal(req: Request, name: str, entry: dict) -> tuple[str, str] | None:
+    """Why this one scope entry does not cover the call, or None if it does. Every check is against this entry alone,
+    so a call cannot take `urn` from one entry and `path` from another."""
+    for k, allowed in entry.get("constraints", {}).items():
+        if k not in req.arguments:
+            return "CONSTRAINT_MISSING", k
+        if not _value_allowed(k, req.arguments[k], allowed):
+            return "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
+    return _volume_refusal(name, req.arguments, entry)
+
+
 def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patterns: list[str]) -> tuple[str, str, str]:
     name = f"{req.server}.{req.tool}"
     for pat in deny:
         if fnmatch.fnmatch(name, pat):
             return "DENY", "DENIED_BY_RULE", pat
+    # Question 5: an issuer may grant the same tool in several entries (one per school). The call is allowed if any
+    # one entry accepts it, not just the first entry that lists the tool.
+    refusals = []
     for entry in scope:
         if entry["server"] != req.server or req.tool not in entry["tools"]:
             continue
-        for k, allowed in entry.get("constraints", {}).items():
-            if k not in req.arguments:
-                return "DENY", "CONSTRAINT_MISSING", k
-            if str(req.arguments[k]) not in set(map(str, allowed)):
-                return "DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
-        for pat in step_up_patterns:
-            if fnmatch.fnmatch(name, pat):
-                return "STEP_UP", "SENSITIVE_TOOL", pat
-        return "ALLOW", "IN_SCOPE", ""
-    return "DENY", "OUT_OF_SCOPE", name
+        refusal = _entry_refusal(req, name, entry)
+        if refusal is None:
+            for pat in step_up_patterns:
+                if fnmatch.fnmatch(name, pat):
+                    return "STEP_UP", "SENSITIVE_TOOL", pat
+            return "ALLOW", "IN_SCOPE", ""
+        refusals.append(refusal)
+    if not refusals:
+        return "DENY", "OUT_OF_SCOPE", name
+    code, detail = min(refusals, key=lambda r: _MISS_RANK.get(r[0], len(_MISS_RANK)))
+    return "DENY", code, detail
 
 
 # ---------------------------------------------------------------- the pipeline

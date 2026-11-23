@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from gateway import cli, main
 from gateway import eval as ev
 from gateway.lib.common import priv_from_pem
-from gateway.lib.gateway_verify import Request
+from gateway.lib.gateway_verify import Request, check_request, normalise_path
 from mcp_server.api.routes_mcp import mcp
 
 
@@ -147,7 +147,7 @@ def test_issue_with_claims_of_your_own(gw, tmp_path, capsys):
         cli.main([*issue, "--claims", '{"scope": []}'])
 
 
-def test_eval_set_passes_against_template_gateway(gw, tmp_path):
+def test_eval_set_passes(gw, tmp_path):
     client, _, state = gw
     ev.main(["build", "--state", str(state), "-o", str(tmp_path / "pack")])
 
@@ -156,6 +156,108 @@ def test_eval_set_passes_against_template_gateway(gw, tmp_path):
         return r.status_code, r.json()
 
     results = ev.run_cases(tmp_path / "pack", post)
-    # questions 3 to 5 are the teams' build work, so only the starter's questions 0 to 2 must pass
-    assert [line for ok, line in results if not ok and line[:2] in {"Q0", "Q1", "Q2"}] == []
+    # questions 0 to 2 came working; 3 to 5 are fixed in check_request, so every case must pass
+    assert [line for ok, line in results if not ok] == []
     assert len(results) == len(ev.VALID) + len(ev.INVALID) + len(ev.BUILD)
+
+
+SCH01_SEARCH = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
+FILES_GET = {"server": "pupil-data", "tools": ["get"], "constraints": {"path": [ev.SCHOOLS, ev.MANIFEST]}}
+
+
+def decide(tool, scope, **arguments):
+    """check_request on its own: (decision, reason_code), no keys or network."""
+    req = Request(server="pupil-data", tool=tool, arguments=arguments, mandate="", nonce="", ts=0, sig="")
+    decision, code, _ = check_request(req, scope, deny=["*.write"], step_up_patterns=["*.write", "*.draft"])
+    return decision, code
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"query": "P0004", "urn": "SCH01"}, ("ALLOW", "IN_SCOPE")),
+        ({"query": "SPR", "urn": "SCH01", "limit": 100}, ("ALLOW", "IN_SCOPE")),
+        ({"query": "", "urn": "SCH01"}, ("DENY", "QUERY_TOO_BROAD")),
+        ({"query": "   ", "urn": "SCH01"}, ("DENY", "QUERY_TOO_BROAD")),
+        ({"urn": "SCH01"}, ("DENY", "QUERY_TOO_BROAD")),
+        ({"query": "SPR", "urn": "SCH01", "limit": 101}, ("DENY", "LIMIT_EXCEEDED")),
+        # the server would read each of these as a number, so the gateway must not compare them as anything else
+        ({"query": "SPR", "urn": "SCH01", "limit": "1000"}, ("DENY", "LIMIT_INVALID")),
+        ({"query": "SPR", "urn": "SCH01", "limit": 1000.0}, ("DENY", "LIMIT_INVALID")),
+        ({"query": "SPR", "urn": "SCH01", "limit": True}, ("DENY", "LIMIT_INVALID")),
+        ({"query": "SPR", "urn": "SCH01", "limit": 0}, ("DENY", "LIMIT_INVALID")),
+        ({"query": "SPR", "urn": "SCH01", "limit": -1}, ("DENY", "LIMIT_INVALID")),
+        # the school is still checked before how much
+        ({"query": "", "urn": "SCH02"}, ("DENY", "CONSTRAINT_VIOLATED")),
+    ],
+)
+def test_q3_search_volume(arguments, expected):
+    assert decide("search", [SCH01_SEARCH], **arguments) == expected
+
+
+def test_q3_max_rows_in_the_mandate():
+    tight = [{**SCH01_SEARCH, "max_rows": 10}]
+    assert decide("search", tight, query="SPR", urn="SCH01", limit=10) == ("ALLOW", "IN_SCOPE")
+    assert decide("search", tight, query="SPR", urn="SCH01", limit=11) == ("DENY", "LIMIT_EXCEEDED")
+    # left out, the server returns up to 100, which is more than this mandate allows
+    assert decide("search", tight, query="SPR", urn="SCH01") == ("DENY", "LIMIT_EXCEEDED")
+    wide = [{**SCH01_SEARCH, "max_rows": 1000}]
+    assert decide("search", wide, query="SPR", urn="SCH01", limit=1000) == ("ALLOW", "IN_SCOPE")
+    assert decide("search", wide, query="", urn="SCH01", limit=1000) == ("DENY", "QUERY_TOO_BROAD")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (ev.SCHOOLS, ("ALLOW", "IN_SCOPE")),
+        ("./synthetic/synthetic_schools.csv", ("ALLOW", "IN_SCOPE")),
+        ("synthetic//synthetic_schools.csv", ("ALLOW", "IN_SCOPE")),
+        ("synthetic/./synthetic_schools.csv", ("ALLOW", "IN_SCOPE")),
+        ("synthetic/../synthetic/synthetic_schools.csv", ("ALLOW", "IN_SCOPE")),
+        ("synthetic/../synthetic/synthetic_display_names.csv", ("DENY", "CONSTRAINT_VIOLATED")),
+        ("../synthetic/synthetic_schools.csv", ("DENY", "CONSTRAINT_VIOLATED")),
+        ("synthetic/../../data/synthetic/synthetic_schools.csv", ("DENY", "CONSTRAINT_VIOLATED")),
+        ("/app/mcp_server/data/synthetic/synthetic_schools.csv", ("DENY", "CONSTRAINT_VIOLATED")),
+        ("//synthetic/synthetic_schools.csv", ("DENY", "CONSTRAINT_VIOLATED")),
+        ("", ("DENY", "CONSTRAINT_VIOLATED")),
+        (["synthetic/synthetic_schools.csv"], ("DENY", "CONSTRAINT_VIOLATED")),
+    ],
+)
+def test_q4_path_spellings(path, expected):
+    assert decide("get", [FILES_GET], path=path) == expected
+
+
+def test_q4_normalise_path():
+    assert normalise_path("a/./b//c/../d") == "a/b/d"
+    assert normalise_path("a/b/") == "a/b"
+    assert normalise_path("a/../..") is None
+    assert normalise_path("/a") is None
+    assert normalise_path("a\x00b") is None
+
+
+def test_q5_any_entry_can_allow():
+    two = [SCH01_SEARCH, {**SCH01_SEARCH, "constraints": {"urn": ["SCH02"]}}]
+    assert decide("search", two, query="SPR", urn="SCH01") == ("ALLOW", "IN_SCOPE")
+    assert decide("search", two, query="SPR", urn="SCH02") == ("ALLOW", "IN_SCOPE")
+    assert decide("search", two, query="SPR", urn="SCH03") == ("DENY", "CONSTRAINT_VIOLATED")
+    assert decide("search", two, query="SPR") == ("DENY", "CONSTRAINT_MISSING")
+    # the closest entry gives the reason: SCH02 matches the second entry, which then refuses on volume
+    assert decide("search", two, query="", urn="SCH02") == ("DENY", "QUERY_TOO_BROAD")
+
+
+def test_q5_entries_are_not_mixed():
+    # one entry: SCH01, but only pupil P0004; another: any query, but only at SCH02
+    scope = [
+        {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"], "query": ["P0004"]}},
+        {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH02"]}},
+    ]
+    assert decide("search", scope, query="P0004", urn="SCH01") == ("ALLOW", "IN_SCOPE")
+    assert decide("search", scope, query="SPR", urn="SCH02") == ("ALLOW", "IN_SCOPE")
+    # urn from the first entry, a free query from the second: neither entry allows that whole call
+    assert decide("search", scope, query="SPR", urn="SCH01") == ("DENY", "CONSTRAINT_VIOLATED")
+
+
+def test_step_up_still_applies_after_scope():
+    scope = [{"server": "pupil-data", "tools": ["draft"], "constraints": {"urn": ["SCH04"]}}]
+    assert decide("draft", scope, urn="SCH04", pupil_ids=["P0011"]) == ("STEP_UP", "SENSITIVE_TOOL")
+    assert decide("draft", scope, urn="SCH01", pupil_ids=["P0011"]) == ("DENY", "CONSTRAINT_VIOLATED")

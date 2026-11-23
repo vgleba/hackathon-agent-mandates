@@ -117,11 +117,16 @@
           },
           "constraints": {
             "type": "object",
-            "description": "Argument constraints: each key must appear in tool arguments with a value in the given list",
+            "description": "Argument constraints: each key must appear in tool arguments with a value in the given list. A `path` value is compared after normalising (./a and a//b both mean a); one that still starts with / or .. is refused",
             "additionalProperties": {
               "type": "array",
               "items": {}
             }
+          },
+          "max_rows": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Most rows one call may ask for, for tools that take a `limit` (pupil-data.search, pupil-data.get). Default 100, the server's own default limit. A `limit` above it, or the server default when `limit` is left out and the default is above it, is refused with LIMIT_EXCEEDED"
           }
         }
       }

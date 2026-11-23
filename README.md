@@ -151,6 +151,11 @@ The starter gateway checks a request in this order
 3. The scope: is the tool on a deny rule, is it in scope, and does every constrained argument have an allowed
    value?
 
+Since questions 3 to 5 were fixed, step 3 also asks how much: a `search` needs a non-blank `query`, and a `limit` on
+`search` or `get` (100 when left out) must be a whole number no higher than the scope entry's `max_rows` (default
+100). A `path` is compared after normalising (`./a` and `a//b` mean `a`; anything still starting with `/` or `..` is
+refused). A mandate with several entries for one tool allows the call if any one entry accepts all of it.
+
 Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or `403 DENY`, with a `reason_code`:
 
 | `reason_code` | Meaning |
@@ -164,6 +169,8 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `DENIED_BY_RULE` | The tool matches a `deny` glob. Checked before scope |
 | `OUT_OF_SCOPE` | No scope entry lists the tool |
 | `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |
+| `QUERY_TOO_BROAD` | A `search` with a blank or missing `query`, which matches every row |
+| `LIMIT_EXCEEDED` / `LIMIT_INVALID` | The `limit` (or the server's default of 100) is above the entry's `max_rows`, or `limit` is not a whole number of at least 1 |
 
 
 ### Changing a mandate
