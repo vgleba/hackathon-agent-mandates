@@ -15,6 +15,13 @@ from .common import jwk_to_pub
 class TrustedList:
     doc: dict
 
+    @property
+    def audience(self) -> str:
+        audience = self.doc.get("gateway_audience")
+        if not isinstance(audience, str) or not audience:
+            raise ValueError("trusted list has no gateway audience")
+        return audience
+
     def issuer_key(self, iss: str, kid: str):
         jwk = self.doc["issuers"].get(iss, {}).get(kid)
         return jwk_to_pub(jwk) if jwk else None

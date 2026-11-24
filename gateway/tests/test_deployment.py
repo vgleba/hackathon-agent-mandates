@@ -8,7 +8,6 @@ starts nothing that signs for whoever asks.
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -19,20 +18,22 @@ import yaml
 from fastapi.testclient import TestClient
 
 from gateway import cli, main
+from gateway.lib.people_policy import validate_people_policy
+from gateway.lib.trust_registry import TrustedList
 from mcp_server.api.routes_mcp import mcp
 
 ROOT = Path(__file__).resolve().parents[2]
-# what the running gateway reads from its state folder, and the placeholder that keeps the folder in the image
-IMAGE_STATE = {
+# what is published for the running gateway, but injected only at runtime
+RUNTIME_CONFIG = {
     "trusted_list.json",
     "status_list.json",
     "status_list.jwt",
-    "people.json",
     "people.jwt",
-    "gateway_key.pem",
-    ".gitkeep",
 }
 KEPT_OUT = [
+    *RUNTIME_CONFIG,
+    "people.json",
+    "gateway_key.pem",
     "issuer_key.pem",
     "agent.pem",
     "demo_agent.pem",
@@ -102,8 +103,26 @@ def signed_search(state: Path) -> dict:
 
 
 def test_the_committed_compose_file_starts_only_what_is_deployed():
-    assert set(compose("docker-compose.yaml")["services"]) == {"backend", "gateway"}
+    production = compose("docker-compose.yaml")
+    assert set(production["services"]) == {"backend", "gateway"}
     assert "GATEWAY_DEMO" not in (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    gateway = production["services"]["gateway"]
+    mounts = gateway["volumes"]
+    assert "./gateway/state/runtime/config:/app/gateway/config:ro" in mounts
+    assert "./gateway/state/runtime/secrets/gateway_key.pem:/run/secrets/gateway_key.pem:ro" in mounts
+    assert "./gateway/state/runtime/data:/app/gateway/runtime" in mounts
+    assert all("./gateway/state:/" not in mount for mount in mounts)
+    assert gateway["read_only"] is True
+    assert gateway["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in gateway["security_opt"]
+
+    backend = production["services"]["backend"]
+    assert "./mcp_server/data/synthetic:/app/mcp_server/data/synthetic:ro" in backend["volumes"]
+    assert "backend-writes:/app/mcp_server/data/writes" in backend["volumes"]
+    assert backend["read_only"] is True
+    assert backend["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in backend["security_opt"]
+    assert "backend-writes" in production["volumes"]
 
 
 def test_the_demo_overlay_switches_the_walkthrough_on():
@@ -125,10 +144,19 @@ def test_the_image_leaves_out_the_demo_and_every_other_secret():
     assert ignored("gateway/demo.py", patterns)
     for name in KEPT_OUT:
         assert ignored(f"gateway/state/{name}", patterns), name
-    for name in IMAGE_STATE:
-        assert not ignored(f"gateway/state/{name}", patterns), name
+    assert ignored("local/CODE_HARDENING_GAP_REPORT.md", patterns)
     for path in ("gateway/main.py", "gateway/lib/gateway_verify.py", "gateway/cli.py", "pyproject.toml", "uv.lock"):
         assert not ignored(path, patterns), path
+
+
+def test_gateway_starts_without_a_writable_uv_cache():
+    dockerfile = (ROOT / "gateway" / "Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["/app/.venv/bin/uvicorn"' in dockerfile
+    assert 'CMD ["uv", "run"' not in dockerfile
+
+    backend_dockerfile = (ROOT / "mcp_server" / "Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["/app/.venv/bin/uvicorn"' in backend_dockerfile
+    assert 'CMD ["uv", "run"' not in backend_dockerfile
 
 
 def test_without_the_demo_file_the_gateway_works_and_has_no_demo(state):
@@ -156,16 +184,17 @@ def test_without_the_demo_file_the_gateway_works_and_has_no_demo(state):
     assert not (state / "demo_mandate.jwt").exists()
 
 
-def test_the_gateway_needs_only_the_state_the_image_carries(state, tmp_path, monkeypatch):
+def test_the_gateway_needs_only_published_config_its_key_and_runtime_data(state, monkeypatch):
     call = signed_search(state)
-    image_state = tmp_path / "image_state"
-    image_state.mkdir()
-    for name in IMAGE_STATE:
-        if (state / name).exists():
-            shutil.copy2(state / name, image_state / name)
-    assert not (image_state / "issuer_key.pem").exists()
+    runtime = cli.publish_runtime(state)
+    config, key, data = runtime / "config", runtime / "secrets" / "gateway_key.pem", runtime / "data"
+    assert {p.name for p in config.iterdir()} == RUNTIME_CONFIG
+    assert not (config / "issuer_key.pem").exists()
+    assert not (config / "people.json").exists()
 
-    monkeypatch.setattr(main, "STATE_DIR", image_state)
+    monkeypatch.setattr(main, "STATE_DIR", config)
+    monkeypatch.setenv("GATEWAY_DATA_DIR", str(data))
+    monkeypatch.setenv("GATEWAY_KEY_FILE", str(key))
     monkeypatch.setitem(main.MCP_SERVERS, "pupil-data", mcp)
     monkeypatch.delenv("GATEWAY_DEMO", raising=False)
     with TestClient(main.app, raise_server_exceptions=False) as client:
@@ -186,6 +215,8 @@ def test_private_keys_are_written_for_their_owner_only(tmp_path):
     cli.main(["--state", str(state), "init"])
     for name in ("issuer_key.pem", "gateway_key.pem", "person_officer_jsmith.pem"):
         assert mode(state / name) == 0o600, name
+    assert mode(state / "runtime" / "secrets" / "gateway_key.pem") == 0o600
+    assert mode(state) == 0o700
 
     cli.load_or_create_key(tmp_path / "agent.pem")
     assert mode(tmp_path / "agent.pem") == 0o600
@@ -193,3 +224,48 @@ def test_private_keys_are_written_for_their_owner_only(tmp_path):
     (state / "issuer_key.pem").chmod(0o644)  # a key from before this change, written again
     cli.main(["--state", str(state), "init", "--force"])
     assert mode(state / "issuer_key.pem") == 0o600
+
+
+def test_every_cli_people_change_publishes_a_trusted_monotonic_policy(state):
+    registry = TrustedList(json.loads((state / "trusted_list.json").read_text(encoding="utf-8")))
+    first = validate_people_policy((state / "people.jwt").read_text(encoding="utf-8"), registry)
+    cli.set_person(state, "officer:new", status="active", urns=["SCH01"], clearance=1, daily_pupils=10)
+    second = validate_people_policy((state / "people.jwt").read_text(encoding="utf-8"), registry)
+    assert second.sequence > first.sequence
+    assert second.people["officer:new"]["authz_epoch"] == 1
+    published = validate_people_policy(
+        (state / "runtime" / "config" / "people.jwt").read_text(encoding="utf-8"), registry
+    )
+    assert published.digest == second.digest
+
+
+def test_loading_pre_v2_people_state_migrates_and_signs_it(state):
+    people = json.loads((state / "people.json").read_text(encoding="utf-8"))
+    for person in people.values():
+        person.pop("authz_epoch")
+    (state / "people.json").write_text(json.dumps(people), encoding="utf-8")
+    (state / "people.jwt").unlink()
+
+    migrated = cli.load_people(state)
+
+    assert all(person["authz_epoch"] == 1 for person in migrated.values())
+    assert (state / "people.jwt").exists()
+    assert (state / "runtime" / "config" / "people.jwt").exists()
+
+
+def test_runtime_publication_is_an_exact_fail_closed_view(state):
+    runtime = cli.publish_runtime(state)
+    config = runtime / "config"
+    (config / "stale-secret.pem").write_text("must not survive publication", encoding="utf-8")
+    (state / "people.jwt").unlink()
+
+    cli.publish_runtime(state)
+
+    assert not (config / "stale-secret.pem").exists()
+    assert not (config / "people.jwt").exists()
+
+
+def test_principal_filename_normalization_cannot_silently_share_an_approval_key(state):
+    cli.person_key(state, "role:a")
+    with pytest.raises(ValueError, match="filename collides"):
+        cli.person_key(state, "role-a")

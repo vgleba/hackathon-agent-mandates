@@ -1,7 +1,5 @@
 """Question 3: right school, but how much is too much? Every case goes through the real endpoint."""
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -25,6 +23,7 @@ def call(tmp_path, monkeypatch):
     state = tmp_path / "state"
     cli.main(["--state", str(state), "init"])
     key = cli.load_or_create_key(state / "agent.pem")
+    cli.set_person(state, "officer:jsmith", daily_pupils=10_000)
     mandate, _ = cli.issue_mandate(
         state,
         key.public_key(),
@@ -36,9 +35,6 @@ def call(tmp_path, monkeypatch):
         org="test",
         extra={"clearance": 4, "budget": {"pupils": 10_000}},
     )
-    people = cli.load_people(state)
-    people["officer:jsmith"]["daily_pupils"] = 10_000
-    (state / "people.json").write_text(json.dumps(people))
     monkeypatch.setattr(main, "STATE_DIR", state)
     monkeypatch.setitem(main.MCP_SERVERS, "pupil-data", mcp)
     agent = priv_from_pem((state / "agent.pem").read_bytes())

@@ -8,13 +8,22 @@ services:
       context: .
       dockerfile: ./mcp_server/Dockerfile
     volumes:
-      - ./mcp_server/data:/app/mcp_server/data
+      - ./mcp_server/data/synthetic:/app/mcp_server/data/synthetic:ro
+      - backend-writes:/app/mcp_server/data/writes
     container_name: mcp-backend
     # not published: it has no access control, so only the gateway may reach it
     expose:
       - "8080"
     env_file:
       - .env
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/healthcheck" ]
       interval: 3s
@@ -32,12 +41,22 @@ services:
     ports:
       - "8082:8082"
     volumes:
-      - ./gateway/state:/app/gateway/state
+      - ./gateway/state/runtime/config:/app/gateway/config:ro
+      - ./gateway/state/runtime/secrets/gateway_key.pem:/run/secrets/gateway_key.pem:ro
+      - ./gateway/state/runtime/data:/app/gateway/runtime
     environment:
       - MCP_SERVERS=pupil-data=http://backend:8080/mcp/
-      - GATEWAY_STATE_DIR=/app/gateway/state
-      - LITELLM_KEY=${LITELLM_KEY:-}
-      - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
+      - GATEWAY_STATE_DIR=/app/gateway/config
+      - GATEWAY_DATA_DIR=/app/gateway/runtime
+      - GATEWAY_KEY_FILE=/run/secrets/gateway_key.pem
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:8082/healthcheck" ]
       interval: 3s
@@ -53,3 +72,6 @@ services:
 networks:
   agent-mandate-hack-network:
     driver: bridge
+
+volumes:
+  backend-writes:

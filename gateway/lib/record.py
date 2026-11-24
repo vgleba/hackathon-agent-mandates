@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ from .common import canonical, sha256_hex, sign_bytes, verify_bytes
 
 log = logging.getLogger(__name__)
 REDACTED = {"value", "reason"}   # a correction's new value can be special category data, and its reason is free text
+HASHED = {"query", "pupil_id", "pupil_ids"}  # names, free text and identifiers do not belong in request arguments
 UNATTRIBUTED_PER_MINUTE = 60     # beyond this, requests with no genuine mandate are counted, not written
 NOBODY = "unattributed"
 
@@ -41,7 +43,11 @@ def safe_arguments(arguments: dict) -> dict:
             return {safe_text(str(k), 40): clean(x, depth + 1) for k, x in list(v.items())[:20]}
         return "..."
 
-    return {k: "(not recorded)" if k in REDACTED else v for k, v in clean(arguments).items()}
+    cleaned = clean(arguments)
+    return {
+        k: "(not recorded)" if k in REDACTED else sha256_hex(canonical(v)) if k in HASHED else v
+        for k, v in cleaned.items()
+    }
 
 
 class Record:
@@ -50,6 +56,8 @@ class Record:
         self.last = {"seq": 0, "hash": "start"}
         self._minute, self._junk = 0, 0
         if self.path.exists():
+            if os.name != "nt":
+                os.chmod(self.path, 0o600)
             found = check(self.path, key.public_key())
             if found != "ok":
                 msg = f"the record {self.path} is {found}. Keep that file, move it aside, and find out why"
@@ -71,9 +79,13 @@ class Record:
             entry = {"seq": self.last["seq"] + 1, "prev": self.last["hash"], "ts": time.time(), **event}
             entry["hash"] = sha256_hex(canonical(entry))
             entry["sig"] = sign_bytes(self.key, entry["hash"].encode())
-            with self.path.open("a", encoding="utf-8", newline="\n") as f:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as f:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(f.fileno(), 0o600)
                 f.write(json.dumps(entry) + "\n")
                 f.flush()
+                os.fsync(f.fileno())
             self.last = entry
             return entry
 

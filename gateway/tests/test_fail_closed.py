@@ -75,7 +75,51 @@ def test_genuinely_signed_mandate_missing_its_status_claim_is_refused(gw):
         claims, priv_to_pem(issuer), algorithm="EdDSA", headers={"typ": "mandate+jwt", "kid": "issuer-2026-11"}
     )
     r = client.post("/tools/call", json=body_for(token))
-    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "MALFORMED_REQUEST")
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "CLAIM_NOT_UNDERSTOOD")
+
+
+@pytest.mark.parametrize("missing", ["clearance", "purpose_code", "budget", "aud", "principal_epoch", "vct"])
+def test_hardened_mandate_profile_has_no_fail_open_claims(gw, missing):
+    client, agent, mandate, state = gw
+    issuer = priv_from_pem((state / "issuer_key.pem").read_bytes())
+    claims = jwt.decode(mandate, options={"verify_signature": False})
+    claims.pop(missing)
+    token = jwt.encode(
+        claims,
+        priv_to_pem(issuer),
+        algorithm="EdDSA",
+        headers={"typ": "mandate+jwt", "kid": "issuer-2026-11"},
+    )
+    body = cli.sign_request(
+        agent,
+        server="pupil-data",
+        tool="search",
+        arguments={"query": "P0004", "urn": "SCH01"},
+        mandate=token,
+    )
+    r = client.post("/tools/call", json=body)
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "CLAIM_NOT_UNDERSTOOD")
+
+
+def test_a_mandate_for_another_gateway_is_refused(gw):
+    client, agent, mandate, state = gw
+    issuer = priv_from_pem((state / "issuer_key.pem").read_bytes())
+    claims = jwt.decode(mandate, options={"verify_signature": False}) | {"aud": "urn:hack:gateway:other"}
+    token = jwt.encode(
+        claims,
+        priv_to_pem(issuer),
+        algorithm="EdDSA",
+        headers={"typ": "mandate+jwt", "kid": "issuer-2026-11"},
+    )
+    body = cli.sign_request(
+        agent,
+        server="pupil-data",
+        tool="search",
+        arguments={"query": "P0004", "urn": "SCH01"},
+        mandate=token,
+    )
+    r = client.post("/tools/call", json=body)
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "WRONG_AUDIENCE")
 
 
 def unsigned(header: dict, claims: dict) -> str:
@@ -172,7 +216,7 @@ def good_call(client, key, mandate):
     return client.post("/tools/call", json=body)
 
 
-@pytest.mark.parametrize("name", ["status_list.jwt", "people.json"])
+@pytest.mark.parametrize("name", ["status_list.jwt", "people.jwt"])
 def test_a_file_that_is_busy_for_a_moment_is_read_again(gw, monkeypatch, name):
     # Windows refuses to open a file at the moment it is being replaced
     client, key, mandate, _ = gw
@@ -187,7 +231,7 @@ def test_a_file_that_is_busy_for_a_moment_is_read_again(gw, monkeypatch, name):
     assert good_call(client, key, mandate).status_code == 200
 
 
-@pytest.mark.parametrize("name", ["status_list.jwt", "people.json"])
+@pytest.mark.parametrize("name", ["status_list.jwt", "people.jwt"])
 def test_a_file_that_cannot_be_read_means_no(gw, monkeypatch, name):
     client, key, mandate, _ = gw
     assert good_call(client, key, mandate).status_code == 200  # so that an old copy could have been kept
@@ -286,6 +330,65 @@ def test_a_status_list_that_stays_unreadable_is_refused_in_the_persons_name(gw, 
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "STATUS_UNAVAILABLE")
     last = json.loads((state / "record.jsonl").read_text().splitlines()[-1])
     assert (last["principal"], last["reason"]) == ("officer:jsmith", "STATUS_UNAVAILABLE")
+
+
+def test_an_older_authentic_status_list_cannot_undo_revocation(gw):
+    client, key, mandate, state = gw
+    old = (state / "status_list.jwt").read_text(encoding="utf-8")
+    assert good_call(client, key, mandate).status_code == 200
+    idx = jwt.decode(mandate, options={"verify_signature": False})["status"]["status_list"]["idx"]
+    cli.revoke_mandate(state, idx)
+    revoked = good_call(client, key, mandate)
+    assert (revoked.status_code, revoked.json()["decision"]["reason_code"]) == (403, "REVOKED")
+
+    (state / "status_list.jwt").write_text(old, encoding="utf-8")
+    rolled_back = good_call(client, key, mandate)
+    assert (rolled_back.status_code, rolled_back.json()["decision"]["reason_code"]) == (403, "STATUS_UNAVAILABLE")
+
+
+def test_an_older_authentic_people_policy_cannot_restore_authority(gw):
+    client, key, mandate, state = gw
+    old = (state / "people.jwt").read_text(encoding="utf-8")
+    assert good_call(client, key, mandate).status_code == 200
+    cli.set_person(state, "officer:jsmith", status="left")
+    paused = good_call(client, key, mandate)
+    assert (paused.status_code, paused.json()["decision"]["reason_code"]) == (403, "PERSON_PAUSED")
+
+    (state / "people.jwt").write_text(old, encoding="utf-8")
+    rolled_back = good_call(client, key, mandate)
+    assert (rolled_back.status_code, rolled_back.json()["decision"]["reason_code"]) == (403, "POLICY_UNAVAILABLE")
+
+
+def test_people_policy_signed_by_an_untrusted_key_is_refused(gw):
+    client, key, mandate, state = gw
+    token = (state / "people.jwt").read_text(encoding="utf-8")
+    claims = jwt.decode(token, options={"verify_signature": False})
+    attacker = cli.load_or_create_key(state / "attacker.pem")
+    forged = jwt.encode(claims, priv_to_pem(attacker), algorithm="EdDSA", headers=jwt.get_unverified_header(token))
+    (state / "people.jwt").write_text(forged, encoding="utf-8")
+    response = good_call(client, key, mandate)
+    assert (response.status_code, response.json()["decision"]["reason_code"]) == (403, "POLICY_UNAVAILABLE")
+
+
+def test_people_policy_from_another_trusted_mandate_issuer_is_refused(gw):
+    client, key, mandate, state = gw
+    token = (state / "people.jwt").read_text(encoding="utf-8")
+    claims = jwt.decode(token, options={"verify_signature": False})
+    other = cli.load_or_create_key(state / "other-issuer.pem")
+    other_name, other_kid = "https://other-issuer.hack.local", "other-2026"
+    main.state["registry"].doc["issuers"][other_name] = {other_kid: cli.pub_to_jwk(other.public_key())}
+    claims["iss"] = other_name
+    signed = jwt.encode(
+        claims,
+        priv_to_pem(other),
+        algorithm="EdDSA",
+        headers={"typ": "people+jwt", "kid": other_kid},
+    )
+    (state / "people.jwt").write_text(signed, encoding="utf-8")
+
+    response = good_call(client, key, mandate)
+
+    assert (response.status_code, response.json()["decision"]["reason_code"]) == (403, "POLICY_UNAVAILABLE")
 
 
 # ------------------------------------------------------------ the demo routes sign for anyone who asks

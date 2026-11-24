@@ -63,9 +63,7 @@ class World:
         return json.loads((self.state / "people.json").read_text())
 
     def person(self, principal, **fields):
-        everyone = self.people()
-        everyone[principal] = {**everyone.get(principal, {}), **fields}
-        (self.state / "people.json").write_text(json.dumps(everyone))
+        cli.set_person(self.state, principal, **fields)
 
     @staticmethod
     def new_key():

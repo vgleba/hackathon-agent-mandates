@@ -259,6 +259,14 @@ def test_one_helper_can_be_stopped_alone(pair):
     assert pair.world.call("roster", pair.parent, **YEAR_11)[0] == 200
 
 
+def test_one_reserved_slot_cannot_be_reused_for_another_child(pair):
+    assert pair.reason(pair.child()) == "IN_SCOPE"
+    other = pair.world.new_key()
+    second = pair.child(jti="urn:uuid:another-child", cnf={"jwk": pub_to_jwk(other.public_key())})
+    status, reply = pair.world.call("roster", second, key=other, **YEAR_11)
+    assert (status, reply["decision"]["reason_code"]) == (403, "DELEGATION_NOT_ALLOWED")
+
+
 @pytest.mark.parametrize("idx", [0, 999, -1, None, "3", True, [0], ...])
 def test_a_helper_must_use_a_number_the_person_set_aside(pair, idx):
     # otherwise a helper could pick a number nobody will ever revoke

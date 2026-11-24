@@ -55,7 +55,6 @@ gateway = [
     "uvicorn>=0.31.0",
     "pyjwt>=2.9.0",
     "cryptography>=42",
-    "litellm>=1.95",
 ]
 synth = [
     "pandas>=2.2",

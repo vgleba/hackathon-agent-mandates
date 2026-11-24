@@ -18,8 +18,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import jwt
+
 from gateway.cli import issue_mandate, load_or_create_key, revoke_mandate, sign_request
-from gateway.lib.common import priv_from_pem
+from gateway.lib.common import priv_from_pem, priv_to_pem
 
 SERVER = "pupil-data"
 SCHOOL, OTHER_SCHOOL = "SCH01", "SCH02"
@@ -132,6 +134,14 @@ BUILD = [
 ]
 
 
+def expired_copy(state: Path, token: str, seconds: int = 120) -> str:
+    """Make the deliberately expired, correctly signed fixture without allowing unsafe TTLs in normal issuance."""
+    claims = jwt.decode(token, options={"verify_signature": False})
+    claims["exp"] = claims["iat"] - seconds
+    issuer = priv_from_pem((state / "issuer_key.pem").read_bytes())
+    return jwt.encode(claims, priv_to_pem(issuer), algorithm="EdDSA", headers=jwt.get_unverified_header(token))
+
+
 def cmd_build(a) -> None:
     out, state = a.out, a.state
     out.mkdir(parents=True, exist_ok=True)
@@ -143,11 +153,12 @@ def cmd_build(a) -> None:
         "principal": "eval:runner",
         "org": "org:hackathon",
     }
-    (out / "valid.jwt").write_text(issue_mandate(state, agent.public_key(), ttl=a.ttl, **common)[0])
+    valid = issue_mandate(state, agent.public_key(), ttl=a.ttl, **common)[0]
+    (out / "valid.jwt").write_text(valid)
     token, idx = issue_mandate(state, agent.public_key(), ttl=a.ttl, **common)
     (out / "revoked.jwt").write_text(token)
     revoke_mandate(state, idx)
-    (out / "expired.jwt").write_text(issue_mandate(state, agent.public_key(), ttl=-120, **common)[0])
+    (out / "expired.jwt").write_text(expired_copy(state, valid))
     for stem, scope in JOBS.values():
         job = {**common, "scope": scope}
         (out / f"{stem}.jwt").write_text(issue_mandate(state, agent.public_key(), ttl=a.ttl, **job)[0])

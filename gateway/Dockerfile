@@ -15,7 +15,9 @@ RUN uv sync --locked --no-dev --no-install-project --extra gateway
 COPY gateway gateway
 
 RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /app/gateway/config /app/gateway/runtime /run/secrets \
+    && chown -R appuser:appuser /app /run/secrets \
+    && chmod 0700 /app/gateway/runtime /run/secrets
 
 USER appuser
 
@@ -23,4 +25,4 @@ EXPOSE 8082
 
 HEALTHCHECK CMD curl --fail http://localhost:8082/healthcheck
 
-CMD ["uv", "run", "--no-sync", "uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8082"]
+CMD ["/app/.venv/bin/uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8082"]

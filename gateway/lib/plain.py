@@ -10,8 +10,8 @@ import time
 
 from .policy import PURPOSES
 
-STANDARD = {"iss", "jti", "iat", "nbf", "exp", "vct", "delegator", "cnf", "agent_id", "purpose", "scope", "deny",
-            "status", "shown"}
+STANDARD = {"iss", "jti", "iat", "nbf", "exp", "vct", "aud", "delegator", "principal_epoch", "cnf", "agent_id",
+            "purpose", "scope", "deny", "status", "shown"}
 OURS = {"clearance", "budget", "purpose_code", "may_delegate", "helpers"}
 TERMS = {"AUT": "autumn", "SPR": "spring", "SUM": "summer"}
 KINDS = {"absence": "absence", "attendance_meeting": "attendance meeting"}

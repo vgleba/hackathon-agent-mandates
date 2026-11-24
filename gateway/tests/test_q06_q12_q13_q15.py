@@ -7,6 +7,7 @@ import shutil
 
 import pytest
 
+from gateway import cli
 from mcp_server.api import routes_mcp
 
 from .conftest import CENSUS, JSMITH, TERM, entry
@@ -134,8 +135,8 @@ def test_searching_for_a_hidden_value_finds_nothing(world, urn):
 @pytest.mark.parametrize("clearance", [1, 2, 3])
 def test_hidden_columns_have_no_effect_on_any_answer(world, tmp_path, monkeypatch, clearance):
     """The strongest form: scramble every hidden value, and no reply may change in any way."""
-    m = world.mandate(entry("search", urn=["SCH01"]), clearance=clearance, budget={"pupils": 10_000})
     world.person(JSMITH, daily_pupils=10_000)
+    m = world.mandate(entry("search", urn=["SCH01"]), clearance=clearance, budget={"pupils": 10_000})
     rng = random.Random(clearance)  # noqa: S311
     queries = ["P0004", "SPR", "1_ENG", "2023/24", "F", "M", "15", "ASIA", "WHIT", "0", "1", ",1,2", "C", "P00"]
     queries += ["".join(rng.choice("0123456789PFMCSWHIENGAUR_/,") for _ in range(rng.randint(1, 3))) for _ in range(40)]
@@ -188,13 +189,35 @@ def test_an_agent_gets_the_overlap_of_its_mandate_and_its_person(world):
     assert world.reason("search", m, query="2023/24", urn="SCH05") == "PERSON_PAUSED"
 
 
+def test_school_authority_is_required_even_for_low_labelled_search(world):
+    priya(world)
+    m = world.mandate(entry("search"), principal="officer:priya")
+    assert world.reason("search", m, query="P0011") == "PERSON_LOST_ACCESS"
+
+
+def test_an_old_mandate_does_not_revive_when_a_person_returns(world):
+    priya(world)
+    m = world.mandate(entry("search", urn=["SCH05"]), principal="officer:priya")
+    assert world.call("search", m, query="2023/24", urn="SCH05")[0] == 200
+    priya(world, status="left")
+    assert world.reason("search", m, query="2023/24", urn="SCH05") == "PERSON_PAUSED"
+    priya(world, status="active")
+    assert world.reason("search", m, query="2023/24", urn="SCH05") == "PERSON_AUTHORITY_CHANGED"
+
+
 def test_someone_not_on_the_list_is_refused(world):
     priya(world)
     m = world.mandate(entry("search", urn=["SCH05"]), principal="officer:priya")
     everyone = world.people()
     del everyone["officer:priya"]
-    (world.state / "people.json").write_text(json.dumps(everyone))
+    cli.save_people(world.state, everyone)
     assert world.reason("search", m, query="2023/24", urn="SCH05") == "PERSON_UNKNOWN"
+
+
+def test_hand_editing_plain_people_does_not_change_gateway_policy(world):
+    m = world.mandate(entry("search", urn=["SCH01"]))
+    (world.state / "people.json").write_text("{}")
+    assert world.call("search", m, query="P0004", urn="SCH01")[0] == 200
 
 
 def test_a_mandate_cannot_be_written_for_someone_not_on_the_list(world):
@@ -202,17 +225,17 @@ def test_a_mandate_cannot_be_written_for_someone_not_on_the_list(world):
         world.mandate(entry("search", urn=["SCH05"]), principal="nobody:does-not-exist")
 
 
-@pytest.mark.parametrize("text", ["", "{", "[]", "null", '{"officer:jsmith": null}', '{"officer:jsmith": {}}'])
+@pytest.mark.parametrize("text", ["", "{", "[]", "null", "a.b.c"])
 def test_a_broken_list_of_people_refuses_everyone(world, text):
     m = world.mandate(entry("search", urn=["SCH01"]))
-    (world.state / "people.json").write_text(text)
-    assert world.call("search", m, query="P0004", urn="SCH01")[0] == 403
+    (world.state / "people.jwt").write_text(text)
+    assert world.reason("search", m, query="P0004", urn="SCH01") == "POLICY_UNAVAILABLE"
 
 
 def test_a_missing_list_of_people_refuses_everyone(world):
     m = world.mandate(entry("search", urn=["SCH01"]))
-    (world.state / "people.json").unlink()
-    assert world.call("search", m, query="P0004", urn="SCH01")[0] == 403
+    (world.state / "people.jwt").unlink()
+    assert world.reason("search", m, query="P0004", urn="SCH01") == "POLICY_UNAVAILABLE"
 
 
 def test_a_mandate_cannot_exceed_its_persons_clearance(world):

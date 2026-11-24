@@ -44,6 +44,7 @@ from gateway.lib.common import (
 from gateway.lib.delegation import CHILD_TYP
 from gateway.lib.gateway_verify import Request
 from gateway.lib.mandate_issuer import MandateIssuer
+from gateway.lib.people_policy import issue_people_policy
 from gateway.lib.record import check as check_record
 from gateway.lib.status_list import StatusListIssuer
 
@@ -57,6 +58,8 @@ DEFAULT_SCOPE = [
     },
 ]
 DEFAULT_DENY = ["*.write", "pii.*"]
+DEFAULT_PROFILE = {"clearance": 3, "purpose_code": "scope_only", "budget": {"pupils": 50}}
+RUNTIME_CONFIG_FILES = ("trusted_list.json", "status_list.json", "status_list.jwt", "people.jwt")
 # who may grant access, checked on every call (question 13). The eval and the default mandate use these two
 DEFAULT_PEOPLE = {
     "officer:jsmith": {
@@ -68,6 +71,7 @@ DEFAULT_PEOPLE = {
     },
     "eval:runner": {"name": "Eval", "status": "active", "urns": "*", "clearance": 3, "daily_pupils": 300},
 }
+AUTHORITY_FIELDS = {"status", "urns", "clearance", "daily_pupils", "jwk", "successor"}
 
 
 def replace_text(path: Path, text: str) -> None:
@@ -85,27 +89,100 @@ def replace_text(path: Path, text: str) -> None:
             return
 
 
+def ensure_audience(state: Path, meta: dict | None = None) -> str:
+    """Give state made before mandate v2 one stable gateway audience without replacing any key."""
+    trusted_path, status_path = state / "trusted_list.json", state / "status_list.json"
+    trusted = json.loads(trusted_path.read_text(encoding="utf-8"))
+    meta = json.loads(status_path.read_text(encoding="utf-8")) if meta is None else meta
+    audience = trusted.get("gateway_audience") or meta.get("audience") or f"urn:hack:gateway:{uuid.uuid4()}"
+    if trusted.get("gateway_audience") != audience:
+        trusted["gateway_audience"] = audience
+        replace_text(trusted_path, json.dumps(trusted, indent=2))
+    if meta.get("audience") != audience:
+        meta["audience"] = audience
+        replace_text(status_path, json.dumps(meta, indent=2))
+    else:
+        meta["audience"] = audience
+    return audience
+
+
 def _load_status(state: Path) -> tuple[StatusListIssuer, dict]:
     meta = json.loads((state / "status_list.json").read_text())
-    issuer = StatusListIssuer(meta["issuer"], meta["uri"], priv_from_pem((state / "issuer_key.pem").read_bytes()))
+    ensure_audience(state, meta)
+    issuer = StatusListIssuer(
+        meta["issuer"],
+        meta["uri"],
+        priv_from_pem((state / "issuer_key.pem").read_bytes()),
+        sequence=meta.get("sequence", 0),
+    )
     issuer.bits = bytearray(b64u_decode(meta["bits_b64u"]))
     issuer._next = meta["next"]  # noqa: SLF001
     return issuer, meta
 
 
 def _save_status(state: Path, issuer: StatusListIssuer, meta: dict) -> None:
-    meta.update(next=issuer._next, bits_b64u=b64u(bytes(issuer.bits)))  # noqa: SLF001
+    issuer.sequence += 1
+    meta.update(next=issuer._next, bits_b64u=b64u(bytes(issuer.bits)), sequence=issuer.sequence)  # noqa: SLF001
     replace_text(state / "status_list.json", json.dumps(meta, indent=2))
     # a week: the gateway fails closed on a stale list and nothing republishes between CLI runs
     replace_text(state / "status_list.jwt", issuer.publish(ttl=7 * 86400))
+    publish_runtime(state)
+
+
+def _normal_people(people: dict) -> dict:
+    if (
+        not isinstance(people, dict)
+        or not people
+        or not all(isinstance(principal, str) and isinstance(person, dict) for principal, person in people.items())
+    ):
+        msg = "people.json must be a non-empty object of people"
+        raise ValueError(msg)
+    return {principal: {**person, "authz_epoch": person.get("authz_epoch", 1)} for principal, person in people.items()}
+
+
+def save_people(state: Path, people: dict) -> dict:
+    """Write the issuer's working copy and the signed, monotonic policy consumed by the gateway."""
+    people = _normal_people(people)
+    if not all(type(person["authz_epoch"]) is int and person["authz_epoch"] >= 1 for person in people.values()):
+        msg = "every person needs a positive authorization epoch"
+        raise ValueError(msg)
+    meta = json.loads((state / "status_list.json").read_text(encoding="utf-8"))
+    ensure_audience(state, meta)
+    sequence_path = state / "people_sequence.json"
+    if sequence_path.exists():
+        sequence = json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"]
+    elif (state / "people.jwt").exists():
+        sequence = jwt.decode((state / "people.jwt").read_text(), options={"verify_signature": False}).get("seq", 0)
+    else:
+        sequence = 0
+    if type(sequence) is not int or sequence < 0:
+        msg = "people policy sequence is invalid"
+        raise ValueError(msg)
+    sequence += 1
+    token = issue_people_policy(
+        people,
+        issuer=meta["issuer"],
+        kid=meta["kid"],
+        priv=priv_from_pem((state / "issuer_key.pem").read_bytes()),
+        sequence=sequence,
+    )
+    replace_text(state / "people.json", json.dumps(people, indent=2))
+    replace_text(sequence_path, json.dumps({"sequence": sequence}, indent=2))
+    replace_text(state / "people.jwt", token)
+    publish_runtime(state)
+    return people
 
 
 def load_people(state: Path) -> dict:
-    """Everyone who may grant access. Written with the defaults the first time, for a state made before it existed."""
+    """Everyone who may grant access. The CLI keeps this working copy; the gateway reads only people.jwt."""
     path = state / "people.json"
     if not path.exists():
-        replace_text(path, json.dumps(DEFAULT_PEOPLE, indent=2))
-    return json.loads(path.read_text(encoding="utf-8"))
+        return save_people(state, DEFAULT_PEOPLE)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    people = _normal_people(raw)
+    if people != raw or not (state / "people.jwt").exists():
+        return save_people(state, people)
+    return people
 
 
 def write_private(path: Path, data: bytes) -> None:
@@ -115,6 +192,43 @@ def write_private(path: Path, data: bytes) -> None:
         if hasattr(os, "fchmod"):  # not on Windows, which does not keep these bits anyway
             os.fchmod(f.fileno(), 0o600)
         f.write(data)
+
+
+def publish_runtime(state: Path) -> Path:
+    """Publish only the files a gateway may receive, separated from issuer and agent secrets."""
+    runtime = state / "runtime"
+    config, secrets_dir, data_dir = runtime / "config", runtime / "secrets", runtime / "data"
+    config.mkdir(parents=True, exist_ok=True)
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        state.chmod(0o700)
+        runtime.chmod(0o700)
+        config.chmod(0o750)
+        secrets_dir.chmod(0o700)
+        data_dir.chmod(0o700)
+        for private in [*state.glob("*.pem"), state / "gateway.db", state / "record.jsonl"]:
+            if private.exists():
+                private.chmod(0o600)
+    allowed_config = set(RUNTIME_CONFIG_FILES)
+    for published in config.iterdir():
+        if published.name not in allowed_config:
+            if published.is_dir() and not published.is_symlink():
+                msg = f"unexpected directory in runtime config: {published}"
+                raise ValueError(msg)
+            published.unlink()
+    for name in RUNTIME_CONFIG_FILES:
+        source = state / name
+        if source.exists():
+            replace_text(config / name, source.read_text(encoding="utf-8"))
+        else:
+            (config / name).unlink(missing_ok=True)
+    gateway_key = state / "gateway_key.pem"
+    if gateway_key.exists():
+        write_private(secrets_dir / "gateway_key.pem", gateway_key.read_bytes())
+    else:
+        (secrets_dir / "gateway_key.pem").unlink(missing_ok=True)
+    return runtime
 
 
 def load_or_create_key(path: Path):
@@ -172,12 +286,14 @@ def issue_mandate(
     """
     for warning in scope_warnings(scope):
         print(warning, file=sys.stderr)
-    if principal not in load_people(state):
+    people = load_people(state)
+    if principal not in people:
         msg = f"{principal} is not in people.json. Add them first: cli person --principal {principal} --urns ..."
         raise ValueError(msg)
     status, meta = _load_status(state)
+    profile = {**DEFAULT_PROFILE, **(extra or {})}
     if helpers:
-        extra = {**(extra or {}), "may_delegate": 1, "helpers": [status.allocate() for _ in range(helpers)]}
+        profile |= {"may_delegate": 1, "helpers": [status.allocate() for _ in range(helpers)]}
     idx = status._next  # noqa: SLF001
     token = MandateIssuer(meta["issuer"], meta["kid"], status.priv, status).issue(
         delegator={"principal": principal, "org": org, "authority": "hackathon"},
@@ -185,8 +301,10 @@ def issue_mandate(
         purpose=purpose,
         scope=scope,
         deny=deny,
+        audience=meta["audience"],
+        principal_epoch=people[principal]["authz_epoch"],
         ttl=ttl,
-        extra=extra,
+        extra=profile,
     )
     _save_status(state, status, meta)
     return token, idx
@@ -225,14 +343,24 @@ def sign_as_person(key, principal: str, do: str, **fields) -> dict:
 
 def set_person(state: Path, principal: str, **fields) -> None:
     people = load_people(state)
-    people[principal] = {**people.get(principal, {}), **fields}
-    replace_text(state / "people.json", json.dumps(people, indent=2))
+    previous = people.get(principal)
+    current = {**(previous or {}), **fields}
+    epoch = previous.get("authz_epoch", 1) if previous else 1
+    if previous and any(name in fields and previous.get(name) != current.get(name) for name in AUTHORITY_FIELDS):
+        epoch += 1
+    people[principal] = {**current, "authz_epoch": epoch}
+    save_people(state, people)
 
 
 def person_key(state: Path, principal: str):
     """A person's own key, kept apart from any agent's. In real use it stays on their own device."""
     key = load_or_create_key(state / f"person_{re.sub(r'[^a-z0-9]+', '_', principal.lower())}.pem")
-    set_person(state, principal, jwk=pub_to_jwk(key.public_key()))
+    jwk = pub_to_jwk(key.public_key())
+    owners = [name for name, person in load_people(state).items() if name != principal and person.get("jwk") == jwk]
+    if owners:
+        msg = f"principal key filename collides with {owners}; choose a distinct principal identifier"
+        raise ValueError(msg)
+    set_person(state, principal, jwk=jwk)
     return key
 
 
@@ -260,11 +388,19 @@ def cmd_init(a) -> None:
     write_private(state / "issuer_key.pem", priv_to_pem(issuer_priv))
     write_private(state / "gateway_key.pem", priv_to_pem(gateway_priv))
     (state / "gateway.pub").write_bytes(pub_to_pem(gateway_pub))
-    trusted = {"issuers": {a.issuer: {a.kid: pub_to_jwk(issuer_pub)}}}
+    audience = a.audience or f"urn:hack:gateway:{uuid.uuid4()}"
+    trusted = {"gateway_audience": audience, "issuers": {a.issuer: {a.kid: pub_to_jwk(issuer_pub)}}}
     (state / "trusted_list.json").write_text(json.dumps(trusted, indent=2))
-    meta = {"issuer": a.issuer, "kid": a.kid, "uri": f"{a.issuer}/status/1", "next": 0, "bits_b64u": ""}
+    meta = {
+        "issuer": a.issuer,
+        "kid": a.kid,
+        "audience": audience,
+        "uri": f"{a.issuer}/status/1",
+        "next": 0,
+        "bits_b64u": "",
+    }
     _save_status(state, StatusListIssuer(a.issuer, meta["uri"], issuer_priv), meta)
-    load_people(state)
+    save_people(state, DEFAULT_PEOPLE)
     person_key(state, "officer:jsmith")
     print(f"initialised {state}")
 
@@ -317,8 +453,21 @@ def cmd_person(a) -> None:
     print(json.dumps({a.principal: load_people(a.state)[a.principal]}, indent=2))
 
 
+def cmd_sign_people(a) -> None:
+    """Migrate or republish an issuer working copy as the signed runtime policy."""
+    save_people(a.state, json.loads((a.state / "people.json").read_text(encoding="utf-8")))
+    print(f"signed people policy at {a.state / 'people.jwt'}")
+
+
+def cmd_publish_runtime(a) -> None:
+    runtime = publish_runtime(a.state)
+    print(f"published gateway runtime state at {runtime}")
+
+
 def cmd_log_anchor(a) -> None:
-    lines = (a.state / "record.jsonl").read_text(encoding="utf-8").splitlines()
+    runtime_record = a.state / "runtime" / "data" / "record.jsonl"
+    path = runtime_record if runtime_record.exists() else a.state / "record.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
     last = json.loads(lines[-1])
     print(f"{last['seq']}:{last['hash']}")
 
@@ -328,7 +477,9 @@ def cmd_log_check(a) -> None:
     if a.anchor:
         seq, hashed = a.anchor.split(":", 1)
         anchor = (int(seq), hashed)
-    found = check_record(a.state / "record.jsonl", pub_from_pem((a.state / "gateway.pub").read_bytes()), anchor)
+    runtime_record = a.state / "runtime" / "data" / "record.jsonl"
+    path = runtime_record if runtime_record.exists() else a.state / "record.jsonl"
+    found = check_record(path, pub_from_pem((a.state / "gateway.pub").read_bytes()), anchor)
     if found != "ok":
         sys.exit(found)
     print(found)
@@ -390,6 +541,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915  (one block pe
     s = sub.add_parser("init", help="become an issuer: make the keys that sign mandates (run once)")
     s.add_argument("--issuer", default="https://issuer.hack.local", help="your name as an issuer")
     s.add_argument("--kid", default="issuer-2026-11", help="label for this signing key")
+    s.add_argument("--audience", help="gateway audience (default: a new unique urn:hack:gateway UUID)")
     s.add_argument("--force", action="store_true", help="replace existing keys")
     s.set_defaults(fn=cmd_init)
 
@@ -436,6 +588,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915  (one block pe
         "--key", action="store_true", help="make them a key of their own, to approve and read their log with"
     )
     s.set_defaults(fn=cmd_person)
+
+    s = sub.add_parser("sign-people", help="sign people.json for the gateway (migrates older state)")
+    s.set_defaults(fn=cmd_sign_people)
+
+    s = sub.add_parser("publish-runtime", help="publish only gateway config and its own audit key")
+    s.set_defaults(fn=cmd_publish_runtime)
 
     s = sub.add_parser("log-anchor", help="print the latest entry's number and hash, for somebody else to keep")
     s.set_defaults(fn=cmd_log_anchor)

@@ -44,7 +44,7 @@ def narrower(child: dict, parent: dict) -> bool:
     )
 
 
-def verify_child(token: str, verify_root, helper_revoked, now: float) -> dict:
+def verify_child(token: str, verify_root, helper_revoked, bind_helper, now: float) -> dict:
     """Returns the claims the helper acts under at `now`, the decision's one reading of the clock, or raises Reject."""
     if len(token) > MAX_MANDATE:
         raise Reject("WRONG_TOKEN_TYPE", "too long to be a mandate")
@@ -86,8 +86,14 @@ def verify_child(token: str, verify_root, helper_revoked, now: float) -> dict:
         raise Reject("DELEGATION_NOT_ALLOWED", "not one of the helpers that were set aside", parent)
     if helper_revoked(parent, number, now):
         raise Reject("REVOKED", str(child["jti"]), parent)
+    try:
+        child_jkt = jwk_thumbprint(child["cnf"]["jwk"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise Reject("CHILD_WIDER", "a helper needs one valid proof key", parent) from e
+    if not bind_helper(parent, number, child_jkt, str(child["jti"])):
+        raise Reject("DELEGATION_NOT_ALLOWED", "that helper slot is already bound to another child", parent)
 
     # start from the parent, so that nothing but what is named here can differ
     return {**parent, "exp": child["exp"], "cnf": child["cnf"], "jti": str(child["jti"])[:100], "scope": scope,
-            "agent_id": jwk_thumbprint(child["cnf"]["jwk"]), "deny": [*parent["deny"], *deny], "may_delegate": 0,
+            "agent_id": child_jkt, "deny": [*parent["deny"], *deny], "may_delegate": 0,
             "root": parent["jti"], "scopes": [scope, parent["scope"]]}

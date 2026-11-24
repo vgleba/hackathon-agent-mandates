@@ -1,11 +1,11 @@
 # Adding a claim to a mandate
 
-The starter mandate says which tools, which argument values, until when, and who granted it. Most open questions
-need it to say something more: a clearance, a limit, a purpose the gateway can check. This page is how to put a new
-field into a mandate and make the gateway act on it.
+The hardened v2 mandate already requires an audience, purpose code, clearance, pupil budget and principal
+authorization epoch, as well as tools, argument values, expiry and delegator. Most open questions still need a more
+specific field. This page is how to put one into a mandate and make the gateway act on it.
 
-There are two halves. Issuing needs no code. Enforcing is the work: **until the gateway reads your field, it is
-ignored**, and the mandate behaves exactly as it did without it.
+There are two halves. Issuing needs no code. Enforcing is the work: **until the gateway reads a new extension field,
+it is ignored**. Core v2 claims are different: `_validate_profile` rejects them when absent or malformed.
 
 ## 1. Put it in the mandate
 
@@ -40,7 +40,7 @@ Everything is in [gateway/lib/gateway_verify.py](../gateway/lib/gateway_verify.p
 and revocation have been checked, so `claims` is what the issuer signed.
 
 ```python
-claims = verify_mandate(req.mandate, self.registry, self.status_lists)
+claims = self.verify(req.mandate)
 clearance = claims.get("clearance")  # None for every mandate issued without it
 if ...:  # your rule
     raise Reject("CLEARANCE_TOO_LOW", f"clearance={clearance}")
@@ -60,14 +60,17 @@ docker compose up -d --build gateway
 
 ## What catches people out
 
-- **Mandates without your claim.** The eval pack, the default mandate and the Day 2 attack mandates do not carry
-  it. Decide what a missing claim means. Refusing every mandate without it fails question 0, so run `make eval_run`.
+- **Mandates without your extension claim.** Decide what absence means and update every issuance path that should
+  require it. The CLI already supplies explicit safe values for the core v2 profile. Run `make eval_run` after any
+  profile change so question 0 stays useful.
 - **Only the mandate is signed by the issuer.** The agent cannot edit a claim (the signature breaks), but it writes every
   argument in the request. Never read a clearance or a purpose from the request.
 - **Only your gateway knows the claim.** Another team's gateway ignores it. On Day 2, say what yours enforces in
   your enforcement note.
 - **A different value is a different mandate.** Issue a new one and revoke the old
   ([README, "Changing a mandate"](../README.md#changing-a-mandate)).
-- **Tell other teams.** Add the claim to [gateway/lib/mandate.schema.json](../gateway/lib/mandate.schema.json). It is
-  documentation only: nothing validates a mandate against it.
+- **Tell other teams.** Add the claim to [gateway/lib/mandate.schema.json](../gateway/lib/mandate.schema.json) and, if
+  it is mandatory, to `_validate_profile` in
+  [gateway/lib/gateway_verify.py](../gateway/lib/gateway_verify.py). The schema documents the v2 contract; the
+  verifier enforces the security-relevant profile.
 - **Leave the request alone.** The shape of `POST /tools/call` stays as it is.

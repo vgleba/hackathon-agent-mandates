@@ -11,14 +11,15 @@ queries would be complete. Layer 3 is the guarantee: it holds for queries nobody
 
 Each call is judged on its own. Many small calls can still add up to a school (question 11).
 """
+
 from __future__ import annotations
 
-MAX_PUPILS = 10          # different pupils in one response
-MAX_LIMIT = 100          # rows an agent may ask for; also what it gets when it does not say
-BLANKET_SHARE = 0.9      # a search matching this share of the records in its scope is not a search
-EVERY_ROW = 1_000_000    # the limit the gateway itself sends upstream, so that it counts everything before releasing any
+MAX_PUPILS = 10  # different pupils in one response
+MAX_LIMIT = 100  # rows an agent may ask for; also what it gets when it does not say
+BLANKET_SHARE = 0.9  # a search matching this share of the records in its scope is not a search
+EVERY_ROW = 10_000  # bounded full authorized scope, counted before the gateway releases any rows
 
-MAX_LETTERS = 60         # pupils in one batch of letters: more than the largest year group, which is 54
+MAX_LETTERS = 60  # pupils in one batch of letters: more than the largest year group, which is 54
 
 GOVERNED_TOOLS = frozenset({"search", "get"})
 PUPIL_KEY = "Psuedo ID"  # the data's own spelling
@@ -28,8 +29,12 @@ def check_arguments(tool: str, arguments: dict) -> tuple[str, str] | None:
     """Layer 1. Returns (reason_code, detail) to refuse, or None. Touches no data."""
     if tool == "draft":
         ids = arguments.get("pupil_ids")
-        if (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids)
-                or not 1 <= len(ids) <= MAX_LETTERS):
+        if (
+            not isinstance(ids, list)
+            or not all(isinstance(i, str) for i in ids)
+            or len(set(ids)) != len(ids)
+            or not 1 <= len(ids) <= MAX_LETTERS
+        ):
             return "LIMIT_NOT_ALLOWED", f"a batch of letters is for 1 to {MAX_LETTERS} different pupils"
     if tool not in GOVERNED_TOOLS:
         return None
@@ -54,7 +59,7 @@ def release(tool: str, result, limit: int | None):
     """Layer 3. Returns (result, summary). The summary is None when there are no pupils to count."""
     if not isinstance(result, list):
         return result, None
-    wanted = result[:MAX_LIMIT if limit is None else limit]
+    wanted = result[: MAX_LIMIT if limit is None else limit]
     if tool != "search" and not any(PUPIL_KEY in row for row in wanted):
         return wanted, None
 

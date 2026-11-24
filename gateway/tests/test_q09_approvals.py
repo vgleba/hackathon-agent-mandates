@@ -135,6 +135,16 @@ def test_only_one_caller_can_take_a_hold(tmp_path):
         assert sum(pool.map(lambda _: s.leave_waiting(hold, "running"), range(50))) == 1
 
 
+def test_only_one_collector_can_claim_a_completed_result(tmp_path):
+    store = Store(tmp_path / "x.db")
+    hold = store.hold({}, principal="p", agent_id="a", root="r", until=time.time() + 60)
+    assert store.leave_waiting(hold, "running")
+    store.finish(hold, "done", {"secret": "answer"})
+    with ThreadPoolExecutor(20) as pool:
+        found = list(pool.map(lambda _: store.claim_result(hold, "a", "r"), range(50)))
+    assert sum(item is not None and item["result"] == {"secret": "answer"} for item in found) == 1
+
+
 def test_a_crash_part_way_is_shown_as_unknown_and_never_retried(world, jsmith, writes):
     m, hold = held(world)
     assert main.state["store"].leave_waiting(hold, "running")  # approved, and then the gateway died

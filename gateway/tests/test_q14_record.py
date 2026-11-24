@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gateway import cli, main
+from gateway.eval import expired_copy
 from gateway.lib import record
 from gateway.lib.common import priv_from_pem
 
@@ -75,6 +76,16 @@ def test_long_arguments_are_cut(world):
     assert len((world.state / "record.jsonl").read_text()) < 10_000
 
 
+def test_search_text_and_request_identifiers_are_hashed_in_the_record(world):
+    m = world.mandate(SEARCH)
+    world.call("search", m, query="private free text", urn="SCH01")
+    entry_ = world.entries()[-1]
+    assert "private free text" not in (world.state / "record.jsonl").read_text()
+    assert entry_["args"]["query"].startswith("sha256:")
+    assert entry_["mandate_hash"].startswith("sha256:")
+    assert entry_["request_hash"].startswith("sha256:")
+
+
 def test_nothing_is_kept_from_a_request_with_no_genuine_mandate(world):
     body = world.sign("search", "not-a-mandate", query="PLANTED", urn="SCH01")
     world.post({**body, "tool": "PLANTEDTOOL"})
@@ -94,7 +105,7 @@ def test_junk_cannot_fill_the_disk(world):
 
 def test_wrong_key_expired_and_revoked_use_is_tied_to_the_person(world):
     m, idx = world.issue(SEARCH)
-    old = world.mandate(SEARCH, ttl=-120)
+    old = expired_copy(world.state, world.mandate(SEARCH))
     thief = world.new_key()
     assert world.reason("search", m, key=thief, query="P0004", urn="SCH01") == "POP_FAILED"
     assert world.reason("search", old, query="P0004", urn="SCH01") == "EXPIRED"

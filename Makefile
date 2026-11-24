@@ -55,11 +55,13 @@ eval_open:  ## Fire our cases for open questions 7, 10, 11 and 14 at GATEWAY_URL
 preflight:  ## Refuse to post a gateway URL while demo routes are visible or questions 0 to 5 fail
 	@set -eu; \
 	url="$${GATEWAY_URL:-http://localhost:8082}"; \
+	unsafe=0; \
 	for route in issuer trust mandate call revoke; do \
 		code=$$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' "$$url/demo/$$route"); \
 		echo "GET /demo/$$route: $$code"; \
-		[ "$$code" = 404 ] || { echo "unsafe: /demo/$$route is present"; exit 1; }; \
-	done
+		[ "$$code" = 404 ] || unsafe=1; \
+	done; \
+	[ "$$unsafe" = 0 ] || { echo "unsafe: one or more /demo routes are present"; exit 1; }
 	$(MAKE) eval_run
 
 attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if FEATURE_SCOPE/FEATURE_CLAIMS are set, to each day_2_attack/keys/<team>.jwk

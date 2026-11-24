@@ -82,6 +82,7 @@ Ports: MCP server `:8080` (inside Docker only, it has no access control), gatewa
 | --- | --- | --- |
 | **Issuer key** (`gateway/state/issuer_key.pem`) | The person granting access. Locally, `make hack` makes one, so each team is its own issuer | Signs mandates. The gateway only trusts mandates from issuers in `trusted_list.json` |
 | **Team key** (`gateway/state/agent.pem`) | The caller (a team, a person or an agent). Make a new one any time with `cli keygen` | Signs each request. It only works with a mandate issued for it |
+| **Gateway audit key** (`gateway/state/runtime/secrets/gateway_key.pem`) | Only the gateway runtime | Signs the tamper-evident decision record; it is injected at runtime and is not copied into the image |
 
 The issuer signs a grant for one team key that limits it to certain tools, a school
 and a time window. Unlike a bearer token, a stolen mandate is useless without the team key, and the team key can
@@ -117,7 +118,7 @@ Where each step lives in the code:
 | --- | --- |
 | Team key | `gateway/state/agent.pem`, made by `cli keygen` / `load_or_create_key` in [gateway/cli.py](gateway/cli.py) |
 | Issuer signs the mandate | `cli issue` → `issue_mandate` in [gateway/cli.py](gateway/cli.py), `MandateIssuer` in [gateway/lib/mandate_issuer.py](gateway/lib/mandate_issuer.py). Issuer key: `gateway/state/issuer_key.pem` |
-| Caller signs the request | `sign_request` in [gateway/cli.py](gateway/cli.py) |
+| Caller signs the request | `sign_request` in [gateway/cli.py](gateway/cli.py); the proof binds the mandate audience, `POST`, `/tools/call`, tool, arguments, mandate hash, nonce and time |
 | Gateway endpoint | `tools_call` in [gateway/main.py](gateway/main.py) |
 | Mandate, signature and scope checks | [gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py), trusted issuers [gateway/lib/trust_registry.py](gateway/lib/trust_registry.py), revocation [gateway/lib/status_list.py](gateway/lib/status_list.py) |
 | MCP server | [mcp_server/api/routes_mcp.py](mcp_server/api/routes_mcp.py) |
@@ -150,6 +151,9 @@ The gateway sees each tool as `pupil-data.<tool>`.
 | `deny` | `*.write`, `pii.*` | Refused before scope is checked |
 | `exp` | 3 days from issue (`--ttl`) | The `expired` case uses a copy that expired 2 minutes ago |
 | `cnf.jwk` | public key of `eval_pack/agent.pem` | Only that key can sign requests |
+| `vct` / `aud` | hardened mandate v2 / this gateway's unique audience | Selects the fail-closed validation profile and prevents use at another gateway audience |
+| `purpose_code` / `clearance` / `budget` | explicit signed values | No missing-claim compatibility defaults are applied by the gateway |
+| `principal_epoch` | current epoch from signed people policy | Any authority-bearing change makes old mandates permanently invalid |
 | `principal` / `org` / `purpose` | `eval:runner` / `org:hackathon` / `eval set` | Who it was issued to and why |
 
 Question 5 also uses `eval_pack/two_schools.jwt`, the same mandate with `search` scoped to `SCH01` and `SCH02` as
@@ -158,10 +162,14 @@ two separate entries.
 The starter gateway checks a request in this order
 ([gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py)):
 
-1. The mandate: is it a mandate, is the issuer trusted, is the signature valid, is it in date, is it revoked?
-2. The request: is it signed by the mandate's key, is it fresh (within 5 minutes), has the nonce been seen before?
+1. The mandate: does it match the complete v2 profile and gateway audience, is the issuer trusted, is the signature
+   valid, is it in date, and is it revoked by the newest accepted status-list sequence?
+2. The request: is its destination-bound proof signed by the mandate's key, is it fresh (within 5 minutes), has the
+   nonce been seen before, and is the caller inside the durable rate windows?
 3. The scope: is the tool on a deny rule, is it in scope, and does every constrained argument have an allowed
    value?
+4. The signed people policy: is the delegator active, still authorized for the school and clearance, and still on the
+   exact authorization epoch recorded in the mandate?
 
 Since questions 3 to 5 were fixed, step 3 also asks how much: a `search` needs a non-blank `query`, and a `limit` on
 `search` or `get` (100 when left out) must be a whole number from 1 to 100, and no higher than the scope entry's
@@ -177,8 +185,10 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `SENSITIVE_TOOL` | Step-up: the tool matches `*.write` or `*.draft` |
 | `SIG_INVALID` | The mandate's issuer signature does not match its payload, e.g. after editing it |
 | `EXPIRED` / `REVOKED` | Out of date, or its index is set in the status list |
-| `WRONG_TOKEN_TYPE` / `ISSUER_NOT_ACCREDITED` / `NOT_YET_VALID` / `STATUS_UNAVAILABLE` | Not a mandate, an issuer not in `trusted_list.json`, `nbf` in the future, or the status list cannot be read |
+| `WRONG_TOKEN_TYPE` / `ISSUER_NOT_ACCREDITED` / `WRONG_AUDIENCE` / `NOT_YET_VALID` / `STATUS_UNAVAILABLE` | Not a mandate, an untrusted issuer, another gateway's mandate, `nbf` in the future, or no authentic current status list |
 | `POP_FAILED` | The request was not freshly signed by the mandate's key, predates this gateway process, or reuses a nonce |
+| `RATE_LIMITED` | A durable per-agent/tool, per-mandate or per-principal request window is full |
+| `BACKEND_TIMEOUT` / `BACKEND_RESPONSE_TOO_LARGE` / `BACKEND_UNAVAILABLE` | The data service exceeded its time or response bound, or refused the call |
 | `DENIED_BY_RULE` | The tool matches a `deny` glob. Checked before scope |
 | `OUT_OF_SCOPE` | No scope entry lists the tool |
 | `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |
@@ -187,7 +197,8 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `QUERY_TOO_BROAD` | A `search` that is blank, or that matches 90% or more of the records in its scope |
 | `MALFORMED_REQUEST` | The checks could not make sense of the request, so it is refused |
 | `PATH_NOT_ALLOWED` | A `path` written in a way that a server could read as another file |
-| `PERSON_UNKNOWN` / `PERSON_PAUSED` / `PERSON_LOST_ACCESS` | Who granted it is not in `people.json`, has left, or does not cover that school |
+| `POLICY_UNAVAILABLE` | The signed people policy is missing, forged, stale, torn or rolled back |
+| `PERSON_UNKNOWN` / `PERSON_PAUSED` / `PERSON_LOST_ACCESS` / `PERSON_AUTHORITY_CHANGED` | The delegator is unknown, inactive, outside the school, or has changed authority since issue |
 | `PURPOSE_MISMATCH` / `CLEARANCE_TOO_LOW` | Not what `purpose_code` covers, or too sensitive for the mandate, its purpose or its person |
 | `UNSAFE_GROUPING` / `BUDGET_EXCEEDED` | A count that could single someone out, or more different pupils than the job or the person's day allows |
 | `CHILD_WIDER` / `CHILD_SIG_INVALID` / `DELEGATION_NOT_ALLOWED` | A helper's mandate is wider than its parent, not made by it, or was not allowed |
@@ -196,9 +207,19 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 One `search` or `get` releases 10 different pupils at most. The reply's `volume` says how many, and whether the answer
 was cut short (`trimmed`). The limits are constants in [gateway/lib/volume.py](gateway/lib/volume.py).
 
-`gateway/state/people.json` lists who may grant access: their schools, clearance and daily limit, read on every call. `cli
-person` changes it, and a mandate from anyone else is refused. Every call is written to `gateway/state/record.jsonl` before
-anything is released; `cli log-anchor` prints its latest hash for somebody else to keep, and `cli log-check` checks it.
+`gateway/state/people.json` is the issuer's working copy. `cli person` signs each change into monotonic `people.jwt`;
+the gateway reads only that token and rejects rollback. Authority-bearing changes increment `authz_epoch`, so old
+mandates do not revive when someone returns. Every call is written before release to the runtime `record.jsonl` with
+free-text queries hashed and an `fsync`; `cli log-anchor` prints its latest hash for somebody else to keep, and `cli
+log-check` checks it.
+
+CLI changes also publish the narrow runtime view under `gateway/state/runtime/`: public and signed controls in
+`config/`, only the gateway's audit key in `secrets/`, and no issuer, agent or person key. Compose mounts those read
+only and keeps `gateway.db` and `record.jsonl` in the separate writable `runtime/data/` mount. For state made by an
+older checkout,
+run `cli sign-people`, issue a fresh mandate (which republishes the sequenced status list), then `cli publish-runtime`.
+The data service is also read-only apart from its dedicated `backend-writes` volume for approved corrections; the
+synthetic source files remain immutable in the container.
 
 
 ### Changing a mandate
@@ -286,12 +307,15 @@ For a model-driven agent, give the model `call` as its tool. The agent loop is y
 ## Day 2 deployment checklist
 
 1. Start from fresh issuer state for the public deployment; do not reuse state that was ever exposed with demo mode.
-2. Run `make eval_build`, then issue the default and feature mandates with `make attack_mandates` before building.
-3. Keep `gateway/state/issuer_key.pem`, agent keys and person keys on the issuing laptop. Never publish or commit them.
+2. Run `make eval_build`, then issue the default and feature mandates with `make attack_mandates`. These commands
+   refresh the sequenced status list, signed people policy and `gateway/state/runtime/` publication.
+3. Keep `gateway/state/issuer_key.pem`, agent keys, person keys and the parent state directory on the issuing laptop.
+   The gateway receives only `runtime/config`, `runtime/secrets/gateway_key.pem` and its writable data volume. Never
+   publish or commit the issuer state.
 4. Expose only the gateway. Port 8080 is the unauthenticated data server and must remain private.
-5. Deploy one gateway replica with persistent state. Separate replicas with separate SQLite files split replay and
-   budget state.
+5. Deploy one gateway replica with persistent runtime data. Multiple replicas are safe only when they share the same
+   SQLite store; separate databases split replay, version, rate, helper-slot, hold and budget state.
 6. Before posting the URL, run `GATEWAY_URL=https://… make preflight` from another machine. It requires all five
    `/demo/*` routes to be absent and questions 0 to 5 to pass.
-7. Call `/healthcheck` several times. The `instance` value should stay constant; changes indicate restarts or multiple
-   replicas and require checking the deployment before the attack starts.
+7. Call `/healthcheck` several times. The `instance` and `audience` should stay constant; changes indicate restarts,
+   mixed trust domains or multiple replicas and require checking the deployment before the attack starts.

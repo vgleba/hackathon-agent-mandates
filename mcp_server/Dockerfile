@@ -31,6 +31,7 @@ COPY shared_utils shared_utils
 
 # Create non-root user, own the app directory
 RUN useradd --create-home --shell /bin/bash appuser \
+    && mkdir -p /app/mcp_server/data/writes \
     && chown -R appuser:appuser /app
 
 # Switch to non-root user
@@ -42,4 +43,4 @@ EXPOSE 8080
 HEALTHCHECK CMD curl --fail http://localhost:8080/api/healthcheck
 
 # Command to run the FastAPI app using Uvicorn
-CMD ["uv", "run", "--no-sync", "uvicorn", "mcp_server.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["/app/.venv/bin/uvicorn", "mcp_server.main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,8 +1,10 @@
 """Day 2 boundaries: one request cannot exhaust the gateway or regain freshness after a restart."""
 
+import asyncio
 import json
 import sqlite3
 import time
+from types import SimpleNamespace
 
 import jwt
 import pytest
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from gateway import cli, main
 from gateway.lib.common import MAX_MANDATE, sign_bytes
+from gateway.lib.errors import Reject
 from gateway.lib.gateway_verify import CLOCK_SKEW, REQUEST_MAX_AGE, Request
 from gateway.lib.store import Store
 from mcp_server.api.routes_mcp import mcp
@@ -165,7 +168,7 @@ def test_request_from_before_process_start_is_refused_even_if_nonce_memory_was_l
 def test_healthcheck_identifies_a_process_and_changes_after_restart(world):
     first = world.client.get("/healthcheck").json()
     assert world.client.get("/healthcheck").json() == first
-    assert set(first) == {"status", "instance", "started"}
+    assert set(first) == {"status", "instance", "started", "audience"}
     with TestClient(main.app, raise_server_exceptions=False) as restarted:
         second = restarted.get("/healthcheck").json()
     assert second["instance"] != first["instance"]
@@ -194,6 +197,38 @@ def test_two_stores_on_one_state_refuse_each_others_nonce(tmp_path):
     finally:
         first.close()
         second.close()
+
+
+def test_rate_windows_are_durable_and_bounded(tmp_path):
+    first, second = Store(tmp_path / "shared.db"), Store(tmp_path / "shared.db")
+    try:
+        assert first.allow_rate("agent:a:search", 2, 60, now=100)
+        assert second.allow_rate("agent:a:search", 2, 60, now=100)
+        assert not first.allow_rate("agent:a:search", 2, 60, now=100)
+        assert first.allow_rate("agent:a:search", 2, 60, now=161)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_backend_results_have_time_and_size_bounds(monkeypatch):
+    class FakeClient:
+        def __init__(self, result=None, error=None):
+            self.result, self.error = result, error
+
+        async def call_tool(self, *_args, **_kwargs):
+            if self.error:
+                raise self.error
+            return SimpleNamespace(data=self.result)
+
+    monkeypatch.setattr(main, "MAX_BACKEND_RESPONSE", 4)
+    with pytest.raises(Reject, match="response exceeded") as too_large:
+        asyncio.run(main.backend_call(FakeClient("12345"), "tool", {}))
+    assert too_large.value.code == "BACKEND_RESPONSE_TOO_LARGE"
+
+    with pytest.raises(Reject, match="did not answer") as timed_out:
+        asyncio.run(main.backend_call(FakeClient(error=TimeoutError()), "tool", {}))
+    assert timed_out.value.code == "BACKEND_TIMEOUT"
 
 
 def test_deep_json_is_a_4xx_and_does_not_break_the_next_request(world):

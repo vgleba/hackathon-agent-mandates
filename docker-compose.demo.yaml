@@ -28,5 +28,9 @@ services:
   gateway:
     environment:
       - GATEWAY_DEMO=1
+      - GATEWAY_STATE_DIR=/app/gateway/dev-state
+      - GATEWAY_DATA_DIR=/app/gateway/dev-state
+      - GATEWAY_KEY_FILE=/app/gateway/dev-state/gateway_key.pem
     volumes:
       - ./gateway/demo.py:/app/gateway/demo.py:ro
+      - ./gateway/state:/app/gateway/dev-state

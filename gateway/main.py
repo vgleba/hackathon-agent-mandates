@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import jwt
 from fastapi import FastAPI
 from fastapi import Request as HttpRequest
 from fastapi.exceptions import RequestValidationError
@@ -29,6 +30,7 @@ from gateway.lib import disclosure, policy, volume
 from gateway.lib import record as records
 from gateway.lib.common import (
     MAX_MANDATE,
+    canonical,
     generate_keypair,
     jwk_to_pub,
     priv_from_pem,
@@ -37,6 +39,7 @@ from gateway.lib.common import (
 )
 from gateway.lib.errors import Reject
 from gateway.lib.gateway_verify import CLOCK_SKEW, OWN_SERVER, Decision, Gateway, Request
+from gateway.lib.people_policy import validate_people_policy
 from gateway.lib.record import NOBODY, Record, safe_arguments, safe_text
 from gateway.lib.status_list import validate_status_list
 from gateway.lib.store import Full, Store
@@ -52,6 +55,8 @@ log = logging.getLogger(__name__)
 READ_TRIES = 30
 FRESH = 300  # seconds a signed request stays good
 MAX_BODY = 128 * 1024
+BACKEND_TIMEOUT = 10
+MAX_BACKEND_RESPONSE = 8 * 1024 * 1024
 URN = re.compile(r"SCH(0[1-9]|1[0-2])")
 THIS_TERM = {"academic_year": "2023/24", "term": "SPR"}  # the latest in the data
 PUPIL_ID = re.compile(r"P\d{4}")
@@ -67,23 +72,37 @@ class CallBody(BaseModel):
     sig: str = Field(max_length=128)
 
 
-def load_state(state_dir: Path) -> None:
+def load_state(state_dir: Path, data_dir: Path | None = None, gateway_key_file: Path | None = None) -> None:
     started = time.time()
+    data_dir = state_dir if data_dir is None else data_dir
+    gateway_key_file = state_dir / "gateway_key.pem" if gateway_key_file is None else gateway_key_file
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        data_dir.chmod(0o700)
+        if gateway_key_file.stat().st_mode & 0o077:
+            msg = f"private gateway key has unsafe permissions: {gateway_key_file}"
+            raise RuntimeError(msg)
     registry = TrustedList(json.loads((state_dir / "trusted_list.json").read_text()))
-    state["record"] = Record(state_dir / "record.jsonl", priv_from_pem((state_dir / "gateway_key.pem").read_bytes()))
-    state["store"] = Store(state_dir / "gateway.db")
+    state["registry"] = registry
+    state["record"] = Record(data_dir / "record.jsonl", priv_from_pem(gateway_key_file.read_bytes()))
+    state["store"] = Store(data_dir / "gateway.db")
     state["gateway"] = Gateway(registry, status_lists={}, store=state["store"], started=started)
     status = json.loads((state_dir / "status_list.json").read_text())
     state["status_uri"] = status["uri"]
     state["status_pub"] = registry.issuer_key(status["issuer"], status["kid"])
+    state["policy_issuer"] = status["issuer"]
+    state["policy_kid"] = status["kid"]
     state["dir"] = state_dir
+    state["data_dir"] = data_dir
     state["started"] = started
     state["instance"] = secrets.token_hex(8)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    load_state(STATE_DIR)
+    data_dir = Path(os.environ.get("GATEWAY_DATA_DIR", str(STATE_DIR)))
+    gateway_key = Path(os.environ.get("GATEWAY_KEY_FILE", str(STATE_DIR / "gateway_key.pem")))
+    load_state(STATE_DIR, data_dir, gateway_key)
     store = state["store"]
     yield
     store.close()
@@ -105,7 +124,12 @@ async def wrong_shape(_request: HttpRequest, exc: RequestValidationError):
 
 @app.get("/healthcheck")
 def healthcheck() -> dict:
-    return {"status": "ok", "instance": state["instance"], "started": int(state["started"])}
+    return {
+        "status": "ok",
+        "instance": state["instance"],
+        "started": int(state["started"]),
+        "audience": state["gateway"].audience,
+    }
 
 
 @app.get("/describe")
@@ -113,18 +137,19 @@ async def describe() -> dict:
     """Discovery for bring-your-own agents: what can be called and how a request must be signed."""
     servers = {}
     for name, target in MCP_SERVERS.items():
-        async with Client(target) as client:
+        async with Client(target, timeout=BACKEND_TIMEOUT, init_timeout=BACKEND_TIMEOUT) as client:
             servers[name] = [
                 {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in await client.list_tools()
             ]
     priv, pub = generate_keypair()
+    example_mandate = jwt.encode({"aud": state["gateway"].audience}, key="", algorithm="none")
     example = sign_request(
         priv,
         server="pupil-data",
         tool="search",
         arguments={"query": "P0004", "urn": "SCH01"},
-        mandate="<compact mandate JWT>",
+        mandate=example_mandate,
     )
     return {
         "servers": servers,
@@ -132,7 +157,10 @@ async def describe() -> dict:
         "signing": {
             "alg": "Ed25519 by the key in the mandate's cnf.jwk; sig is base64url without padding",
             "signing_input": "canonical JSON (sorted keys, separators ',' and ':', ensure_ascii=False) of "
-            "{server, tool, arguments, mandate_hash, nonce, ts}",
+            "{aud, htm, htu, server, tool, arguments, mandate_hash, nonce, ts}",
+            "aud": "the mandate's audience; the gateway requires an exact match",
+            "htm": "POST",
+            "htu": "/tools/call",
             "mandate_hash": "'sha256:' + hex sha256 of the compact mandate JWT",
             "ts": "unix seconds, within 300s of gateway time; nonce must be unique per request",
             "example": {
@@ -162,10 +190,10 @@ def whole_status_list(text: str) -> bool:
     JWT and zlib, so the signature must be checked before it replaces the current snapshot.
     """
     try:
-        validate_status_list(text, state["status_pub"], state["status_uri"])
+        snapshot = validate_status_list(text, state["status_pub"], state["status_uri"])
     except (KeyError, ValueError):
         return False
-    return True
+    return state["store"].accept_control(f"status:{state['status_uri']}", snapshot.sequence, snapshot.digest)
 
 
 def refresh_revocations() -> None:
@@ -175,21 +203,46 @@ def refresh_revocations() -> None:
     """
     lists = state["gateway"].status_lists
     try:
+        accepted = False
         for attempt in range(READ_TRIES):
             text = read_shared("status_list.jwt").strip()
             if whole_status_list(text):
+                accepted = True
                 break
             if attempt < READ_TRIES - 1:
                 time.sleep(0.01)
-        lists[state["status_uri"]] = text
+        if accepted:
+            lists[state["status_uri"]] = text
+        else:
+            lists.pop(state["status_uri"], None)
     except OSError:
         log.exception("the revocation list cannot be read")
         lists.pop(state["status_uri"], None)
 
 
 def people() -> dict:
-    """Re-read on every request, so that someone leaving takes effect on the next call."""
-    return json.loads(read_shared("people.json"))
+    """Read only the signed policy, and refuse a forged, torn or rolled-back snapshot."""
+    try:
+        for attempt in range(READ_TRIES):
+            text = read_shared("people.jwt").strip()
+            try:
+                snapshot = validate_people_policy(
+                    text,
+                    state["registry"],
+                    expected_issuer=state["policy_issuer"],
+                    expected_kid=state["policy_kid"],
+                )
+            except ValueError:
+                snapshot = None
+            if snapshot is not None and state["store"].accept_control(
+                f"people:{snapshot.issuer}", snapshot.sequence, snapshot.digest
+            ):
+                return snapshot.people
+            if attempt < READ_TRIES - 1:
+                time.sleep(0.01)
+    except OSError as e:
+        raise Reject("POLICY_UNAVAILABLE", "the people policy cannot be read") from e
+    raise Reject("POLICY_UNAVAILABLE", "the people policy is not authentic and current")
 
 
 @dataclass
@@ -203,15 +256,31 @@ class Grant:
     clearance: int
 
 
+async def backend_call(client: Client, tool: str, arguments: dict):
+    """Bound backend time and response size before policy code can inspect or release the result."""
+    try:
+        result = (await client.call_tool(tool, arguments, timeout=BACKEND_TIMEOUT)).data
+    except TimeoutError as e:
+        raise Reject("BACKEND_TIMEOUT", "the data server did not answer in time") from e
+    try:
+        size = len(canonical(result))
+    except (TypeError, ValueError, OverflowError) as e:
+        raise Reject("BACKEND_RESPONSE_INVALID", "the data server returned an invalid result") from e
+    if size > MAX_BACKEND_RESPONSE:
+        raise Reject("BACKEND_RESPONSE_TOO_LARGE", "the data server response exceeded the gateway limit")
+    return result
+
+
 async def check_policy(client: Client, req: Request, claims: dict, arguments: dict) -> Grant:
     try:
-        labels = policy.Labels((await client.call_tool("classification", {})).data)
+        labels = policy.Labels(await backend_call(client, "classification", {}))
     except (ToolError, KeyError, TypeError, ValueError, AttributeError) as e:
         raise Reject("LABELS_UNAVAILABLE", "cannot tell how sensitive this is, so the answer is no") from e
     need = policy.needed_level(req.tool, arguments, labels)
     person = policy.check_person(people(), claims, req.tool, arguments, need)
     clearance = policy.clearance_for(claims, person, req.tool)
     policy.check_clearance(clearance, need)
+    policy.check_epoch(claims, person)
     if req.tool == "aggregate":
         disclosure.check_shape(arguments)
     return Grant(claims, arguments, labels, person, clearance)
@@ -222,13 +291,13 @@ async def governed_call(client: Client, tool: str, grant: Grant) -> tuple[object
     everything = {"limit": volume.EVERY_ROW}
     if tool == "search":
         # fetch the whole scope and search it here, so that hidden columns cannot affect which rows come back
-        in_scope = (await client.call_tool(tool, {**grant.arguments, "query": "", **everything})).data
+        in_scope = await backend_call(client, tool, {**grant.arguments, "query": "", **everything})
         result = policy.search_visible(in_scope, grant.arguments["query"], grant.clearance, grant.labels)
         if volume.is_blanket(len(result), len(in_scope)):
             # no counts in the detail: how many records a school holds is itself an answer
             raise Reject("QUERY_TOO_BROAD", "query matches nearly every record; look for something more specific")
     else:
-        result = (await client.call_tool(tool, {**grant.arguments, **everything})).data
+        result = await backend_call(client, tool, {**grant.arguments, **everything})
     return volume.release(tool, result, grant.arguments.get("limit"))
 
 
@@ -263,8 +332,20 @@ def learned(tool: str, arguments: dict, result) -> dict:
 def write_record(decision: Decision, req: Request, source: str, seen: dict | None = None) -> None:
     """One entry per call. Nothing from a request with no genuine mandate is kept but the refusal itself."""
     claims = decision.claims
-    event = {"decision": decision.decision, "reason": decision.reason_code, "source": source, "principal": NOBODY}
-    if claims:
+    event = {
+        "decision": decision.decision,
+        "reason": decision.reason_code,
+        "source": source,
+        "principal": NOBODY,
+        "mandate_hash": decision.mandate_hash,
+        "request_hash": decision.request_hash,
+    }
+    if (
+        claims
+        and isinstance(claims.get("delegator"), dict)
+        and isinstance(claims["delegator"].get("principal"), str)
+        and isinstance(claims.get("jti"), str)
+    ):
         event |= {
             "principal": safe_text(str(claims["delegator"]["principal"])),
             "jti": claims["jti"],
@@ -284,11 +365,11 @@ async def run_tool(client: Client, req: Request, grant: Grant) -> tuple[object, 
         result, summary = await governed_call(client, tool, grant)
         extra = {"volume": summary} if summary else {}
     elif tool == "aggregate" and disclosure.counts_pupils(arguments):
-        rows = (await client.call_tool(tool, disclosure.by_pupil(arguments))).data
+        rows = await backend_call(client, tool, disclosure.by_pupil(arguments))
         result, note = disclosure.suppress(rows, arguments["group_by"])
         extra = {"disclosure": note}
     else:
-        result = (await client.call_tool(tool, arguments)).data
+        result = await backend_call(client, tool, arguments)
 
     seen = learned(tool, arguments, result)
     spend(grant, set(seen["pupils"]))
@@ -310,7 +391,7 @@ def connect(req: Request) -> Client:
     target = MCP_SERVERS.get(req.server)
     if target is None:
         raise Reject("NO_SUCH_SERVER", f"no MCP server configured for {req.server!r}")
-    return Client(target)
+    return Client(target, timeout=BACKEND_TIMEOUT, init_timeout=BACKEND_TIMEOUT)
 
 
 def refuse(decision, code: str, detail: str = ""):
@@ -338,6 +419,7 @@ async def handle(body: CallBody, source: str) -> tuple[int, dict]:
         except Reject as r:
             refuse(decision, r.code, r.detail)
         except ToolError as e:
+            refuse(decision, "BACKEND_UNAVAILABLE", "the data server refused the call")
             status, extra = 502, {"error": str(e)}
         except Exception:
             log.exception("refused a call that could not be completed")
@@ -371,9 +453,9 @@ def hold(decision: Decision, body: CallBody) -> str:
 
 def collect(decision: Decision, req: Request, source: str) -> tuple[int, dict]:
     """The agent asks after its own held call. Its result is given once and then forgotten."""
-    found = state["store"].get_hold(req.arguments["id"])
     claims = decision.claims
-    if found is None or (found["agent_id"], found["root"]) != (claims["agent_id"], claims["root"]):
+    found = state["store"].claim_result(req.arguments["id"], claims["agent_id"], claims["root"])
+    if found is None:
         return 403, {"decision": refuse(decision, "OUT_OF_SCOPE", "no such call of yours").to_dict()}
     reply = {"decision": decision.to_dict(), "held": {"state": found["state"], "reason": found["reason"]}}
     if found["state"] == "done" and found["result"] is not None:
@@ -418,6 +500,8 @@ def verify_person(body: PersonBody, do: str, code: str, *fields: str) -> dict:
             and verify_bytes(jwk_to_pub(person["jwk"]), message, body.sig)
             and state["store"].use_nonce(f"person:{body.principal}", body.nonce)
         )
+    except Reject:
+        raise
     except Exception as e:
         raise Reject(code, "could not be checked") from e
     if not good:
@@ -547,8 +631,8 @@ SHOWN = ("seq", "ts", "decision", "reason", "tool", "args", "agent_id", "source"
 
 async def own_data(tool: str, arguments: dict):
     """Something the person may see for themselves, fetched for them and for no agent."""
-    async with Client(MCP_SERVERS["pupil-data"]) as client:
-        return (await client.call_tool(tool, arguments)).data
+    async with Client(MCP_SERVERS["pupil-data"], timeout=BACKEND_TIMEOUT, init_timeout=BACKEND_TIMEOUT) as client:
+        return await backend_call(client, tool, arguments)
 
 
 @app.post("/log")

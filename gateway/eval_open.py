@@ -51,6 +51,7 @@ from gateway.cli import (
 from gateway.lib import plain
 from gateway.lib.common import generate_keypair, priv_to_pem, pub_to_jwk
 from gateway.lib.delegation import CHILD_TYP
+from gateway.lib.record import safe_arguments
 
 DATA = Path(__file__).resolve().parents[1] / "mcp_server/data/synthetic"
 SERVER = "pupil-data"
@@ -468,7 +469,7 @@ def q14_what_it_saw(run: Run, data: Data) -> None:
         seen.append(
             {
                 "tool": f"{SERVER}.search",
-                "args": arguments,
+                "args": safe_arguments(arguments),
                 "decision": d.get("decision"),
                 "reason": d.get("reason_code"),
                 "rows": len(rows),

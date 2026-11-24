@@ -112,6 +112,20 @@ def test_any_scope_entry_may_allow_but_entries_do_not_mix():
     assert check(tool="other", urn="SCH01", path="a") == ("DENY", "OUT_OF_SCOPE")
 
 
+def test_scope_constraints_do_not_coerce_types():
+    scope = [{"server": "s", "tools": ["t"], "constraints": {"year": [1], "flag": [True]}}]
+    req = Request("s", "t", {}, mandate="", nonce="", ts=0, sig="")
+    assert check_request(req, {"year": 1, "flag": True}, [scope], [], [])[:2] == ("ALLOW", "IN_SCOPE")
+    assert check_request(req, {"year": "1", "flag": True}, [scope], [], [])[:2] == (
+        "DENY",
+        "CONSTRAINT_VIOLATED",
+    )
+    assert check_request(req, {"year": 1, "flag": 1}, [scope], [], [])[:2] == (
+        "DENY",
+        "CONSTRAINT_VIOLATED",
+    )
+
+
 def test_issue_warns_when_entries_for_one_tool_constrain_different_arguments():
     def entry(**constraints):
         return {"server": "pupil-data", "tools": ["pupil"], "constraints": constraints}
@@ -177,6 +191,12 @@ def test_describe_and_issue_to_public_jwk(gw, tmp_path, capsys):
     ]
     ex = desc["signing"]["example"]
     assert Request(**ex["request"]).signing_input().decode() == ex["signing_input"]
+    proof = json.loads(ex["signing_input"])
+    assert (proof["aud"], proof["htm"], proof["htu"]) == (
+        client.get("/healthcheck").json()["audience"],
+        "POST",
+        "/tools/call",
+    )
 
     # team runs keygen and sends only the public JWK; issuer never sees the private key
     team_key = tmp_path / "team.pem"

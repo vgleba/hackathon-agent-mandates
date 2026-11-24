@@ -1,15 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hack:mandate:v1",
+  "$id": "urn:hack:mandate:v2",
   "title": "Agentic mandate (JWT claims set)",
-  "description": "Claims carried in an EdDSA-signed JWT (typ: mandate+jwt). Documentation only: the gateway reads the `required` claims and ignores the rest.",
+  "description": "Hardened claims carried in an EdDSA-signed JWT (typ: mandate+jwt). The gateway validates this profile before using the mandate.",
   "type": "object",
   "required": [
     "iss",
     "jti",
+    "iat",
+    "nbf",
     "exp",
+    "vct",
+    "aud",
+    "delegator",
+    "principal_epoch",
     "cnf",
     "agent_id",
+    "purpose",
+    "purpose_code",
+    "clearance",
+    "budget",
     "scope",
     "deny",
     "status"
@@ -34,8 +44,13 @@
       "type": "integer"
     },
     "vct": {
-      "const": "urn:hack:mandate:v1",
+      "const": "urn:hack:mandate:v2",
       "description": "Credential type, SD-JWT VC style."
+    },
+    "aud": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact gateway or gateway trust-domain audience."
     },
     "delegator": {
       "type": "object",
@@ -57,6 +72,11 @@
           "description": "Statutory basis / policy reference"
         }
       }
+    },
+    "principal_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Authorization epoch of the delegating person. It must still match signed people policy."
     },
     "cnf": {
       "type": "object",
@@ -167,7 +187,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 4,
-      "description": "The most sensitive data it may see, on the manifest's scale. Absent means 3: never special category"
+      "description": "The most sensitive data it may see, on the manifest's scale. This claim is required."
     },
     "purpose_code": {
       "type": "string",
@@ -184,7 +204,7 @@
           "minimum": 0
         }
       },
-      "description": "Different pupils the whole job may see, helpers included. Absent means 50"
+      "description": "Different pupils the whole job may see, helpers included. This claim is required."
     },
     "may_delegate": {
       "type": "integer",

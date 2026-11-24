@@ -68,26 +68,26 @@
 
 ## 6. Signed people policy (RT-05 policy; D10; last, can be dropped)
 
-- [ ] 6.1 Add failing tests:
+- [x] 6.1 Add failing tests:
   - `cli person` writes a `people.jwt` that verifies against the trusted list;
   - a hand-edited `people.json` does not change what the gateway applies;
   - a policy signed by an untrusted key, a missing `people.jwt` and a truncated `people.jwt` each give `POLICY_UNAVAILABLE` with a 4xx status;
   - after the truncated case, the next request is still answered
-- [ ] 6.2 Add `save_people(state, people)` in `gateway/cli.py`. It writes `people.json`, then a `people+jwt` token signed with the issuer key. Route `set_person` and `load_people`'s default creation through it, and add `cli sign-people`
-- [ ] 6.3 Have `people()` in `gateway/main.py` read and verify `people.jwt` on every call, with the torn-read retry from `372e5ab`. Raise `Reject("POLICY_UNAVAILABLE")` on any failure, and make sure person routes answer it with a 4xx
-- [ ] 6.4 Run the Desk, lab and `eval_open` tests. Migrate local state with `cli sign-people`. Add `people.jwt` to the README's key and state table
+- [x] 6.2 Add `save_people(state, people)` in `gateway/cli.py`. It writes `people.json`, then a `people+jwt` token signed with the issuer key. Route `set_person` and `load_people`'s default creation through it, and add `cli sign-people`
+- [x] 6.3 Have `people()` in `gateway/main.py` read and verify `people.jwt` on every call, with the torn-read retry from `372e5ab`. Raise `Reject("POLICY_UNAVAILABLE")` on any failure, and make sure person routes answer it with a 4xx
+- [x] 6.4 Run the Desk, lab and `eval_open` tests. Migrate local state with `cli sign-people`. Add `people.jwt` to the README's key and state table
 - [ ] 6.5 If this group is dropped for Day 2, note it in design.md and leave `people.json` in the image allowlist
 
 ## 7. Preflight and Day 2 runbook (D12, Migration Plan)
 
 - [x] 7.1 Add `make preflight GATEWAY_URL=…`. It requests the five `/demo/*` routes, prints each status and fails on any 2xx, then runs `$(MAKE) eval_run`
-- [ ] 7.2 Check preflight locally: it passes against `make run`, and fails against `make demo` naming each open route
+- [x] 7.2 Check preflight locally: it passes against `make run`, and fails against `make demo` naming each open route
 - [x] 7.3 Add a Day 2 section to the README:
   1. Move the development state aside, then run `make gateway_init`.
   2. Run `make eval_build`.
   3. Run `make attack_mandates` before the image is built.
   4. Keep the issuer key on the laptop.
   5. Run preflight before posting the URL.
-- [ ] 7.4 On the final commit, run `make test`, `make lint`, `make eval_run` and `make eval_open`
+- [x] 7.4 On the final commit, run `make test`, `make lint`, `make eval_run` and `make eval_open`
 - [ ] 7.5 Add a status line per RT item at the end of `RED_TEAM_REPORT.md`, with the commit that addressed it
 - [ ] 7.6 After the organisers deploy, run `make preflight GATEWAY_URL=<aws url>` from a laptop, and call `/healthcheck` several times to confirm one instance before posting the URL

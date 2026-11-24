@@ -13,6 +13,7 @@ import pytest
 from gateway import cli, main
 from gateway.lib.common import priv_to_pem
 from gateway.lib.gateway_verify import Request
+from gateway.lib.mandate_issuer import MAX_TTL
 from gateway.lib.status_list import is_revoked
 from mcp_server.api import routes_mcp
 
@@ -57,6 +58,12 @@ def resigned_status(token: str, issuer_key, **changes) -> str:
 
 
 # ------------------------------------------------------------ root mandates
+
+
+@pytest.mark.parametrize("ttl", [-1, 0, True, MAX_TTL + 1])
+def test_issuer_refuses_unsafe_mandate_lifetimes(world, ttl):
+    with pytest.raises(ValueError, match="mandate ttl"):
+        world.mandate(SCH01, ttl=ttl)
 
 
 def test_a_mandate_works_in_its_last_second(world, clock):

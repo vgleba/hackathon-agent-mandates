@@ -17,35 +17,61 @@ from __future__ import annotations
 import binascii
 import time
 import zlib
+from dataclasses import dataclass
 
 import jwt
 
-from .common import b64u, b64u_decode, priv_to_pem, pub_to_pem
+from .common import b64u, b64u_decode, priv_to_pem, pub_to_pem, sha256_hex
 
 STATUS_CLOCK_SKEW = 30  # seconds the publisher's clock may run ahead of the gateway
+MAX_COMPRESSED = 64 * 1024
+MAX_UNCOMPRESSED = 64 * 1024
+
+
+@dataclass(frozen=True)
+class StatusSnapshot:
+    """An authentic status-list snapshot, including the values needed to prevent rollback."""
+
+    bits: bytes
+    sequence: int
+    digest: str
 
 
 class StatusListIssuer:
-    def __init__(self, issuer_url: str, list_uri: str, priv, size: int = 8192):
+    def __init__(self, issuer_url: str, list_uri: str, priv, size: int = 8192, sequence: int = 0):
+        if type(size) is not int or size < 1:
+            raise ValueError("status-list size must be a positive whole number")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("status-list sequence must be a non-negative whole number")
         self.issuer_url = issuer_url
         self.list_uri = list_uri
         self.priv = priv
         self.bits = bytearray((size + 7) // 8)
         self._next = 0
+        self.sequence = sequence
 
     def allocate(self) -> int:
+        if self._next >= len(self.bits) * 8:
+            raise ValueError("status list is full")
         idx, self._next = self._next, self._next + 1
         return idx
 
     def revoke(self, idx: int) -> None:
+        if type(idx) is not int or idx < 0 or idx // 8 >= len(self.bits):
+            raise ValueError("status index out of range")
         self.bits[idx // 8] |= 1 << (idx % 8)
 
     def publish(self, ttl: int) -> str:
+        if type(ttl) is not int or ttl <= 0:
+            raise ValueError("status-list ttl must be a positive whole number")
+        now = int(time.time())
         claims = {
             "iss": self.issuer_url,
             "sub": self.list_uri,
-            "iat": int(time.time()),
+            "iat": now,
+            "exp": now + ttl,
             "ttl": ttl,
+            "seq": self.sequence,
             "status_list": {"bits": 1, "lst": b64u(zlib.compress(bytes(self.bits), 9))},
         }
         return jwt.encode(claims, priv_to_pem(self.priv), algorithm="EdDSA",
@@ -58,13 +84,30 @@ def is_revoked(status_list_jwt: str, idx: int, issuer_pub, expected_uri: str, no
     Only ValueError, whatever went wrong inside: the gateway turns it into STATUS_UNAVAILABLE and keeps the mandate's
     person on the refusal, where any other exception would be an unattributed MALFORMED_REQUEST.
     """
-    raw = validate_status_list(status_list_jwt, issuer_pub, expected_uri, now)
-    if type(idx) is not int or idx < 0 or idx // 8 >= len(raw):
+    snapshot = validate_status_list(status_list_jwt, issuer_pub, expected_uri, now)
+    if type(idx) is not int or idx < 0 or idx // 8 >= len(snapshot.bits):
         raise ValueError("idx out of range")
-    return bool(raw[idx // 8] >> (idx % 8) & 1)
+    return bool(snapshot.bits[idx // 8] >> (idx % 8) & 1)
 
 
-def validate_status_list(status_list_jwt: str, issuer_pub, expected_uri: str, now: float | None = None) -> bytes:
+def _bounded_decompress(encoded: str) -> bytes:
+    if not isinstance(encoded, str) or len(encoded) > MAX_COMPRESSED * 2:
+        raise ValueError("compressed status list is too large")
+    compressed = b64u_decode(encoded)
+    if len(compressed) > MAX_COMPRESSED:
+        raise ValueError("compressed status list is too large")
+    unpacker = zlib.decompressobj()
+    raw = unpacker.decompress(compressed, MAX_UNCOMPRESSED + 1)
+    if len(raw) > MAX_UNCOMPRESSED or unpacker.unconsumed_tail:
+        raise ValueError("uncompressed status list is too large")
+    if not unpacker.eof or unpacker.unused_data:
+        raise ValueError("status list compression is invalid")
+    return raw
+
+
+def validate_status_list(
+    status_list_jwt: str, issuer_pub, expected_uri: str, now: float | None = None
+) -> StatusSnapshot:
     """Verify and unpack a status list, or raise ValueError.
 
     This is also used before a newly read list replaces the gateway's current snapshot, so a complete-looking but
@@ -81,21 +124,23 @@ def validate_status_list(status_list_jwt: str, issuer_pub, expected_uri: str, no
             status_list_jwt,
             pub_to_pem(issuer_pub),
             algorithms=["EdDSA"],
-            options={"verify_iat": False},
+            options={"verify_exp": False, "verify_iat": False, "require": ["iss", "sub", "iat", "exp", "ttl", "seq"]},
         )
         if claims["sub"] != expected_uri:
             raise ValueError("status list uri mismatch")
-        iat, ttl = claims["iat"], claims["ttl"]
-        if type(iat) is not int or type(ttl) is not int or ttl <= 0:
+        iat, exp, ttl, sequence = claims["iat"], claims["exp"], claims["ttl"], claims["seq"]
+        if type(iat) is not int or type(exp) is not int or type(ttl) is not int or ttl <= 0 or exp <= iat:
             raise ValueError("status list time claims are invalid")
+        if type(sequence) is not int or sequence < 1:
+            raise ValueError("status list sequence is invalid")
         if iat > now + STATUS_CLOCK_SKEW:
             raise ValueError("status list is from the future")
-        if now >= iat + ttl:
+        if now >= min(exp, iat + ttl):
             raise ValueError("status list stale")
         sl = claims["status_list"]
         if type(sl["bits"]) is not int or sl["bits"] != 1:
             raise ValueError("only bits=1 supported in this sketch")
-        return zlib.decompress(b64u_decode(sl["lst"]))
+        return StatusSnapshot(_bounded_decompress(sl["lst"]), sequence, sha256_hex(status_list_jwt.encode()))
     except ValueError:
         raise
     except (jwt.PyJWTError, zlib.error, binascii.Error, KeyError, TypeError, AttributeError) as e:

@@ -9,12 +9,17 @@ import re
 
 from .errors import Reject
 
-LEGACY_CLEARANCE = 3   # a mandate with no clearance: never special category
 MOST_SENSITIVE = 4     # what an unlabelled column, file or tool counts as
-DEFAULT_BUDGET = 50    # different pupils, for a mandate with no budget
+SCHOOL_DATA_TOOLS = {"search", "roster", "pupil", "draft", "write", "aggregate"}
 
 # Each purpose names the tools its job needs and the most sensitive data it can justify
 PURPOSES = {
+    # Explicit compatibility profile: the signed scope is the purpose boundary. New human-facing jobs should use a
+    # narrower named purpose below, but no hardened mandate is allowed to omit the claim.
+    "scope_only": {
+        "tools": {"get", "search", "roster", "draft", "pupil", "aggregate", "write", "classification"},
+        "max_level": 4,
+    },
     "newsletter": {"tools": {"get"}, "max_level": 1},
     "absence_letters": {"tools": {"roster", "draft"}, "max_level": 2},
     "meeting_letters": {"tools": {"roster", "draft"}, "max_level": 2},
@@ -82,7 +87,7 @@ def check_person(people, claims: dict, tool: str, arguments: dict, need: int) ->
     if urns != "*":
         where = arguments.get("where")
         urn = arguments.get("urn", where.get("URN") if isinstance(where, dict) else None)
-        if urn is None and need > 1:
+        if urn is None and (tool in SCHOOL_DATA_TOOLS or need > 1):
             raise Reject("PERSON_LOST_ACCESS", f"this covers schools {who} does not")
         if urn is not None and (not isinstance(urn, str) or urn not in urns):
             raise Reject("PERSON_LOST_ACCESS", f"{who} does not cover that school")
@@ -91,15 +96,12 @@ def check_person(people, claims: dict, tool: str, arguments: dict, need: int) ->
 
 def clearance_for(claims: dict, person: dict, tool: str) -> int:
     """The lowest of what the mandate, its purpose and its person allow."""
-    levels = [LEGACY_CLEARANCE]
-    if "clearance" in claims:
-        levels = [whole_number(claims, "clearance", claims["clearance"], 1, MOST_SENSITIVE)]
-    if "purpose_code" in claims:
-        code = claims["purpose_code"]
-        rule = PURPOSES.get(code) if isinstance(code, str) else None
-        if rule is None or tool not in rule["tools"]:
-            raise Reject("PURPOSE_MISMATCH", f"this access is for {code!r}, which does not need {tool}")
-        levels.append(rule["max_level"])
+    levels = [whole_number(claims, "clearance", claims.get("clearance"), 1, MOST_SENSITIVE)]
+    code = claims.get("purpose_code")
+    rule = PURPOSES.get(code) if isinstance(code, str) else None
+    if rule is None or tool not in rule["tools"]:
+        raise Reject("PURPOSE_MISMATCH", f"this access is for {code!r}, which does not need {tool}")
+    levels.append(rule["max_level"])
     levels.append(whole_number(claims, "the person's clearance", person.get("clearance"), 1, MOST_SENSITIVE))
     return min(levels)
 
@@ -109,9 +111,16 @@ def check_clearance(clearance: int, need: int) -> None:
         raise Reject("CLEARANCE_TOO_LOW", f"this needs level {need} and the access is level {clearance}")
 
 
+def check_epoch(claims: dict, person: dict) -> None:
+    """An authority change permanently invalidates grants from the previous principal epoch."""
+    current, granted = person.get("authz_epoch"), claims.get("principal_epoch")
+    if type(current) is not int or current < 1 or type(granted) is not int or granted != current:
+        raise Reject("PERSON_AUTHORITY_CHANGED", "the person's authority changed; issue a new mandate")
+
+
 def budgets(claims: dict, person: dict, day: str) -> list[tuple[str, int]]:
     """Both must have room: the job's, which helpers share, and the person's for today."""
-    claim = claims.get("budget", {"pupils": DEFAULT_BUDGET})
+    claim = claims.get("budget")
     if not isinstance(claim, dict):
         raise Reject("CLAIM_NOT_UNDERSTOOD", "budget must say how many pupils")
     job = whole_number(claims, "budget", claim.get("pupils"), 0, 1_000_000)

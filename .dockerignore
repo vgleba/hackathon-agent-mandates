@@ -1,5 +1,7 @@
 */*.pdf
 *.ipynb
+local/
+mcp_server/data/writes/
 
 # The gateway image is what the organisers deploy, with settings we cannot see, so it must be safe as built
 # (adr/0001-gateway-image-is-the-security-boundary.md). gateway/tests/test_deployment.py checks these rules.
@@ -8,13 +10,6 @@
 # docker-compose.demo.yaml mounts the file back in for the local walkthrough.
 gateway/demo.py
 
-# Only the state the running gateway reads. Never the issuer's, an agent's or a person's private key, a mandate,
-# the nonce database or the record. A mounted state folder hides this one anyway.
-gateway/state/*
-!gateway/state/.gitkeep
-!gateway/state/trusted_list.json
-!gateway/state/status_list.json
-!gateway/state/status_list.jwt
-!gateway/state/people.json
-!gateway/state/people.jwt
-!gateway/state/gateway_key.pem
+# Runtime config and the gateway's audit key are injected at runtime. No state, private key, mandate, database or
+# record is ever copied into the image.
+gateway/state/

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import threading
@@ -14,6 +15,7 @@ import time
 
 NONCE_LIFE = 900         # longer than the oldest request the gateway accepts (300s)
 HOLD_LIFE = 8 * 3600     # a school day
+HOLD_RETENTION = 24 * 3600
 MAX_WAITING = 20         # calls one job may have waiting, so nobody is worn down into approving
 
 TABLES = """
@@ -21,6 +23,10 @@ CREATE TABLE IF NOT EXISTS nonces(who TEXT, nonce TEXT, ts REAL, PRIMARY KEY(who
 CREATE TABLE IF NOT EXISTS seen(meter TEXT, pupil TEXT, PRIMARY KEY(meter, pupil));
 CREATE TABLE IF NOT EXISTS holds(id TEXT PRIMARY KEY, body TEXT, principal TEXT, agent_id TEXT, root TEXT,
                                  state TEXT, created REAL, expires REAL, reason TEXT, result TEXT);
+CREATE TABLE IF NOT EXISTS control_versions(name TEXT PRIMARY KEY, version INTEGER, digest TEXT);
+CREATE TABLE IF NOT EXISTS helper_slots(root TEXT, idx INTEGER, child_jkt TEXT, child_jti TEXT,
+                                        PRIMARY KEY(root, idx));
+CREATE TABLE IF NOT EXISTS rates(bucket TEXT, window INTEGER, count INTEGER, PRIMARY KEY(bucket, window));
 """
 
 
@@ -35,11 +41,14 @@ class Full(Exception):
 class Store:
     def __init__(self, path=":memory:"):
         self.db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, timeout=10)
+        if str(path) != ":memory:" and os.name != "nt":
+            os.chmod(path, 0o600)
         self.lock = threading.RLock()
         self.db.executescript(TABLES)
         self._transaction(self._digest_old_nonces)
         # whatever was running when the gateway stopped: nobody can say if it happened, so it is never tried again
-        self.db.execute("UPDATE holds SET state = 'unknown' WHERE state = 'running'")
+        self.db.execute("UPDATE holds SET state = 'unknown' WHERE state IN ('running', 'collecting')")
+        self._transaction(lambda: self._expire_holds(time.time()))
 
     def close(self) -> None:
         self.db.close()
@@ -79,6 +88,58 @@ class Store:
 
         return self._transaction(work)
 
+    # ------------------------------------------------------------ monotonic control files and helper slots
+
+    def accept_control(self, name: str, version: int, digest: str) -> bool:
+        """Accept a signed control snapshot only if it does not roll back or change at the same version."""
+
+        def work():
+            row = self.db.execute("SELECT version, digest FROM control_versions WHERE name = ?", (name,)).fetchone()
+            if row is not None and (version < row[0] or (version == row[0] and digest != row[1])):
+                return False
+            if row is None or version > row[0]:
+                self.db.execute(
+                    "INSERT INTO control_versions VALUES (?, ?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET version = excluded.version, digest = excluded.digest",
+                    (name, version, digest),
+                )
+            return True
+
+        return self._transaction(work)
+
+    def bind_helper_slot(self, root: str, idx: int, child_jkt: str, child_jti: str) -> bool:
+        """Bind a reserved helper number to its first child key and id, durably and atomically."""
+
+        def work():
+            row = self.db.execute(
+                "SELECT child_jkt, child_jti FROM helper_slots WHERE root = ? AND idx = ?", (root, idx)
+            ).fetchone()
+            if row is None:
+                self.db.execute("INSERT INTO helper_slots VALUES (?, ?, ?, ?)", (root, idx, child_jkt, child_jti))
+                return True
+            return row == (child_jkt, child_jti)
+
+        return self._transaction(work)
+
+    def allow_rate(self, bucket: str, limit: int, period: int, now: float | None = None) -> bool:
+        """Consume one request from a fixed, durable rate window."""
+        now = time.time() if now is None else now
+        window = int(now // period)
+
+        def work():
+            self.db.execute("DELETE FROM rates WHERE window < ?", (window - 2,))
+            row = self.db.execute("SELECT count FROM rates WHERE bucket = ? AND window = ?", (bucket, window)).fetchone()
+            if row is not None and row[0] >= limit:
+                return False
+            self.db.execute(
+                "INSERT INTO rates VALUES (?, ?, 1) "
+                "ON CONFLICT(bucket, window) DO UPDATE SET count = count + 1",
+                (bucket, window),
+            )
+            return True
+
+        return self._transaction(work)
+
     # ------------------------------------------------------------ pupil budgets
 
     def spend(self, meters: list[tuple[str, int]], pupils: set[str]) -> None:
@@ -100,12 +161,23 @@ class Store:
 
     # ------------------------------------------------------------ calls waiting for a person
 
+    def _expire_holds(self, now: float) -> None:
+        self.db.execute(
+            "UPDATE holds SET state = 'lapsed', body = '{}', result = NULL "
+            "WHERE state = 'waiting' AND expires <= ?",
+            (now,),
+        )
+        self.db.execute(
+            "UPDATE holds SET body = '{}', result = NULL "
+            "WHERE state != 'waiting' AND expires <= ?",
+            (now - HOLD_RETENTION,),
+        )
+
     def hold(self, body: dict, *, principal: str, agent_id: str, root: str, until: float) -> str:
         now, hold_id = time.time(), secrets.token_urlsafe(16)
 
         def work():
-            # nothing personal is kept for a request that lapsed
-            self.db.execute("UPDATE holds SET body = '{}' WHERE state = 'waiting' AND expires <= ?", (now,))
+            self._expire_holds(now)
             waiting = self.db.execute(
                 "SELECT COUNT(*) FROM holds WHERE root = ? AND state = 'waiting' AND expires > ?", (root, now)
             ).fetchone()[0]
@@ -120,27 +192,33 @@ class Store:
         return hold_id
 
     def get_hold(self, hold_id: str) -> dict | None:
-        with self.lock:
+        def work():
+            self._expire_holds(time.time())
             cur = self.db.execute("SELECT * FROM holds WHERE id = ?", (hold_id,))
-            row = cur.fetchone()
+            return cur.description, cur.fetchone()
+
+        description, row = self._transaction(work)
         if row is None:
             return None
-        hold = dict(zip([c[0] for c in cur.description], row, strict=True))
-        if hold["state"] == "waiting" and hold["expires"] <= time.time():
-            hold["state"] = "lapsed"
+        hold = dict(zip([c[0] for c in description], row, strict=True))
         hold["body"] = json.loads(hold["body"])
         hold["result"] = json.loads(hold["result"]) if hold["result"] else None
         return hold
 
     def waiting_for(self, principal: str) -> list[dict]:
-        with self.lock:
+        def work():
+            now = time.time()
+            self._expire_holds(now)
             ids = [
                 r[0]
                 for r in self.db.execute(
                     "SELECT id FROM holds WHERE principal = ? AND state = 'waiting' AND expires > ? ORDER BY created",
-                    (principal, time.time()),
+                    (principal, now),
                 )
             ]
+            return ids
+
+        ids = self._transaction(work)
         return [self.get_hold(i) for i in ids]
 
     def leave_waiting(self, hold_id: str, state: str, reason: str = "") -> bool:
@@ -166,8 +244,40 @@ class Store:
             )
         )
 
+    def claim_result(self, hold_id: str, agent_id: str, root: str) -> dict | None:
+        """Atomically claim one completed result. A concurrent collector can never receive the same data."""
+
+        def work():
+            self._expire_holds(time.time())
+            cur = self.db.execute(
+                "SELECT * FROM holds WHERE id = ? AND agent_id = ? AND root = ?", (hold_id, agent_id, root)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            description = cur.description
+            hold = dict(zip([c[0] for c in description], row, strict=True))
+            claimed = False
+            if hold["state"] == "done" and hold["result"] is not None:
+                changed = self.db.execute(
+                    "UPDATE holds SET state = 'collecting' WHERE id = ? AND state = 'done' AND result IS NOT NULL",
+                    (hold_id,),
+                ).rowcount
+                if changed != 1:
+                    return None
+                claimed = True
+            hold["body"] = json.loads(hold["body"])
+            hold["result"] = json.loads(hold["result"]) if claimed and hold["result"] else None
+            return hold
+
+        return self._transaction(work)
+
     def forget_result(self, hold_id: str) -> None:
         """Results hold pupil data, so they go once collected, and the request with them."""
         self._transaction(
-            lambda: self.db.execute("UPDATE holds SET result = NULL, body = '{}' WHERE id = ?", (hold_id,))
+            lambda: self.db.execute(
+                "UPDATE holds SET result = NULL, body = '{}', "
+                "state = CASE WHEN state = 'collecting' THEN 'collected' ELSE state END WHERE id = ?",
+                (hold_id,),
+            )
         )
