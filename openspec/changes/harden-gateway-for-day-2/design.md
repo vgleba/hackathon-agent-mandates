@@ -105,6 +105,8 @@ A test starts the gateway from a directory that holds only the allowlisted files
   - the start-time floor (D9)
 - A root or child mandate is refused when `now >= exp`.
 - `nbf` keeps its 30-second tolerance.
+- PyJWT's own `exp`, `nbf` and `iat` checks are switched off, so ours against `now` are the only ones. PyJWT read its own clock and allowed no tolerance on `iat`, which equals `nbf` at issue. A mandate from an issuer whose clock ran one second fast was therefore refused as `SIG_INVALID`, despite the `nbf` tolerance.
+- A held call already lapses at its mandate's `exp` (`hold(until=claims['exp'])`), so approving one after expiry gets `HOLD_NOT_WAITING`. The expiry check at release is a second line of defence.
 - Releasing a held call is a new decision with its own `now`, so an expired mandate cannot be released.
 - `POLICY_VERSION` is bumped.
 

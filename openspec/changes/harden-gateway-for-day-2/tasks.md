@@ -25,16 +25,16 @@
 
 ## 3. Strict expiry (RT-02; D5)
 
-- [ ] 3.1 Add failing tests with a frozen `time.time`:
+- [x] 3.1 Add failing tests with a frozen `time.time`:
   - root mandate at `exp - 1` (accepted), `exp` and `exp + 5` (both `EXPIRED`);
   - child mandate at its `exp`;
   - expired parent under a live child;
   - `nbf` at +20 seconds (accepted) and +40 seconds (`NOT_YET_VALID`);
   - the clock passing `exp` during a decision;
   - a held call approved after its mandate's `exp`
-- [ ] 3.2 Read `now` once in `Gateway.decide`, and pass it through `verify`, `_verify_root`, `verify_mandate`, `delegation.verify_child` and the freshness check
-- [ ] 3.3 Refuse when `now >= exp` for root and child mandates. Keep `CLOCK_SKEW` for `nbf` only, and bump `POLICY_VERSION`
-- [ ] 3.4 Run `make test` and the in-process questions 0–5 eval, and confirm the red-team test "expired by five seconds returns 200" now gets `EXPIRED`
+- [x] 3.2 Read `now` once in `Gateway.decide`, and pass it through `verify`, `_verify_root`, `verify_mandate`, `delegation.verify_child` and the freshness check
+- [x] 3.3 Refuse when `now >= exp` for root and child mandates. Keep `CLOCK_SKEW` for `nbf` only, and bump `POLICY_VERSION`
+- [x] 3.4 Run `make test` and the in-process questions 0–5 eval, and confirm the red-team test "expired by five seconds returns 200" now gets `EXPIRED`
 
 ## 4. Size limits (RT-03; D6, D7, D8)
 

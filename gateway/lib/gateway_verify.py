@@ -26,8 +26,8 @@ from .record import safe_text
 from .status_list import is_revoked
 from .store import Store
 
-POLICY_VERSION = "2026-11-23.3"
-CLOCK_SKEW = 30
+POLICY_VERSION = "2026-11-24.1"
+CLOCK_SKEW = 30          # seconds an issuer's clock may run ahead: for the start of validity (nbf) only, never exp
 MAX_DETAIL = 200         # characters of `detail` sent back with a decision
 OWN_SERVER = "gateway"   # where an agent asks after a call that is waiting for a person
 log = logging.getLogger(__name__)
@@ -75,8 +75,9 @@ class Request:
 
 # ---------------------------------------------------------------- mandate
 
-def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
-    """Returns the verified claims. Raises Reject."""
+def verify_mandate(token: str, registry, status_lists: dict[str, str], now: float | None = None) -> dict:
+    """Returns the verified claims. Raises Reject. `now` is the decision's one reading of the clock."""
+    now = time.time() if now is None else now
     try:
         hdr = jwt.get_unverified_header(token)
         if hdr.get("typ") != "mandate+jwt":
@@ -89,15 +90,16 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
     if pub is None:
         raise Reject("ISSUER_NOT_ACCREDITED", unverified["iss"])
     try:
+        # time is judged below, against `now`: PyJWT would read its own clock, and allow no skew on `iat`
         claims = jwt.decode(token, pub_to_pem(pub), algorithms=["EdDSA"],
-                            options={"verify_exp": False, "verify_nbf": False, "require": ["exp", "iss", "jti"]})
+                            options={"verify_exp": False, "verify_nbf": False, "verify_iat": False,
+                                     "require": ["exp", "iss", "jti"]})
     except jwt.PyJWTError as e:
         raise Reject("SIG_INVALID", str(e))
 
-    now = time.time()
     if claims.get("nbf", 0) > now + CLOCK_SKEW:
         raise Reject("NOT_YET_VALID", claims["jti"], claims)
-    if claims["exp"] < now - CLOCK_SKEW:
+    if now >= claims["exp"]:  # dead from its expiry second: no grace (red-team RT-02)
         raise Reject("EXPIRED", claims["jti"], claims)
 
     sl = claims["status"]["status_list"]
@@ -211,20 +213,21 @@ class Gateway:
         self.step_up = step_up_patterns or ["*.write", "*.draft"]
         self.store = store or Store()
 
-    def verify(self, token: str) -> dict:
-        """Is this mandate good right now? Returns its claims, or raises Reject."""
+    def verify(self, token: str, now: float | None = None) -> dict:
+        """Is this mandate good at `now` (by default, right now)? Returns its claims, or raises Reject."""
+        now = time.time() if now is None else now
         try:
             child = delegation.is_child(token)
         except jwt.PyJWTError as e:
             raise Reject("WRONG_TOKEN_TYPE", "not a readable mandate") from e
         if child:
-            return delegation.verify_child(token, self._verify_root, self._helper_revoked)
-        claims = self._verify_root(token)
+            return delegation.verify_child(token, self._verify_root, self._helper_revoked, now)
+        claims = self._verify_root(token, now)
         # last, so that a claim of the same name cannot stand in for these
         return {**claims, "root": claims["jti"], "scopes": [claims["scope"]]}
 
-    def _verify_root(self, token: str) -> dict:
-        claims = verify_mandate(token, self.registry, self.status_lists)
+    def _verify_root(self, token: str, now: float) -> dict:
+        claims = verify_mandate(token, self.registry, self.status_lists, now)
         return {**claims, "_kid": jwt.get_unverified_header(token).get("kid", "")}
 
     def _helper_revoked(self, parent: dict, number: int) -> bool:
@@ -240,15 +243,16 @@ class Gateway:
         return *check_request(req, arguments, claims["scopes"], claims["deny"], self.step_up), arguments
 
     def decide(self, req: Request) -> Decision:
-        base = dict(policy_version=POLICY_VERSION, mandate_hash="", request_hash="", ts=time.time())
+        now = time.time()  # the one reading: every time check in this decision is made against it
+        base = dict(policy_version=POLICY_VERSION, mandate_hash="", request_hash="", ts=now)
         claims = None
         try:
             # inside the try: text that is not valid Unicode cannot be hashed
             base.update(mandate_hash=sha256_hex(req.mandate.encode()), request_hash=sha256_hex(req.signing_input()))
-            claims = self.verify(req.mandate)
+            claims = self.verify(req.mandate, now)
             jwk = claims["cnf"]["jwk"]
             who = jwk_thumbprint(jwk)
-            if abs(req.ts - time.time()) > 300:
+            if abs(req.ts - now) > 300:
                 raise Reject("POP_FAILED", "request timestamp outside window")
             if not verify_bytes(jwk_to_pub(jwk), req.signing_input(), req.sig):
                 raise Reject("POP_FAILED", f"bad signature for jkt {who}")

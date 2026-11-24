@@ -23,15 +23,16 @@ The parent's expiry is still checked as for any root mandate.
 - **WHEN** a helper calls with a child mandate and the decision time equals the child's `exp`
 - **THEN** the gateway answers `DENY` with reason code `EXPIRED`
 
-#### Scenario: Parent expired, child not
-- **WHEN** a helper calls with a child mandate whose own `exp` is ahead, but the decision time is at or after the parent's `exp`
-- **THEN** the gateway answers `DENY` with reason code `EXPIRED`
+#### Scenario: Child that ends with its parent
+- **WHEN** a helper calls with a child mandate whose `exp` equals its parent's (a child can never outlive its parent), and the decision time is that `exp`
+- **THEN** the gateway answers `DENY` with reason code `EXPIRED`, from the check on the parent
 
 ### Requirement: Clock tolerance applies only to the start of validity
 The gateway SHALL accept a mandate whose `nbf` is up to 30 seconds after the decision time, and SHALL NOT extend any mandate past its `exp`.
+The gateway's own checks are the only time checks on a mandate. The JWT library does not judge `iat`, `nbf` or `exp` with its own clock.
 
 #### Scenario: Issuer clock slightly ahead
-- **WHEN** a mandate's `nbf` is 20 seconds after the decision time
+- **WHEN** a mandate's `iat` and `nbf` are 20 seconds after the decision time
 - **THEN** the mandate passes the validity checks
 
 #### Scenario: Not yet valid
@@ -47,8 +48,10 @@ This covers mandate `nbf` and `exp`, child `exp`, request freshness and the star
 - **THEN** every check in that decision uses `exp - 1`, and the mandate passes the expiry check
 
 ### Requirement: Held calls are released only while the mandate is valid
-A call waiting for a person's approval MUST be refused at release with reason code `EXPIRED` if its mandate's `exp` has passed by then.
+A call waiting for a person's approval MUST NOT run once its mandate's `exp` has passed.
+The hold lapses at the mandate's `exp`, and release checks the mandate's expiry again.
 
 #### Scenario: Approved after the mandate expired
-- **WHEN** a person approves a held call after the mandate's `exp`
-- **THEN** the call is not run, and the agent collecting it gets a refusal with reason code `EXPIRED`
+- **WHEN** a person approves a held call at or after the mandate's `exp`
+- **THEN** the approval is refused with reason code `HOLD_NOT_WAITING`, because the hold has lapsed, and the call is not run
+- **AND** the agent collecting it with that mandate gets `DENY` with reason code `EXPIRED`

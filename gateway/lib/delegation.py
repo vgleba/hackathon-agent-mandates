@@ -9,8 +9,6 @@ of those, so any helper can also be stopped alone.
 """
 from __future__ import annotations
 
-import time
-
 import jwt
 
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem
@@ -47,8 +45,8 @@ def narrower(child: dict, parent: dict) -> bool:
     )
 
 
-def verify_child(token: str, verify_root, helper_revoked) -> dict:
-    """Returns the claims the helper acts under, or raises Reject."""
+def verify_child(token: str, verify_root, helper_revoked, now: float) -> dict:
+    """Returns the claims the helper acts under at `now`, the decision's one reading of the clock, or raises Reject."""
     if len(token) > LONGEST:
         raise Reject("WRONG_TOKEN_TYPE", "too long to be a mandate")
     parent_token = jwt.decode(token, options={"verify_signature": False}).get("parent")
@@ -56,7 +54,7 @@ def verify_child(token: str, verify_root, helper_revoked) -> dict:
         raise Reject("WRONG_TOKEN_TYPE", "no parent mandate")
     if is_child(parent_token):
         raise Reject("DELEGATION_NOT_ALLOWED", "a helper cannot have helpers")
-    parent = verify_root(parent_token)  # expiry and revocation again, on every call
+    parent = verify_root(parent_token, now)  # expiry and revocation again, on every call
 
     numbers = parent.get("helpers")
     if type(parent.get("may_delegate")) is not int or parent["may_delegate"] < 1:
@@ -82,7 +80,7 @@ def verify_child(token: str, verify_root, helper_revoked) -> dict:
         raise Reject("CHILD_WIDER", "deny must be a list", parent)
     if type(child["exp"]) is not int or child["exp"] > parent["exp"]:
         raise Reject("CHILD_WIDER", "a helper cannot outlive its parent", parent)
-    if child["exp"] < time.time():
+    if now >= child["exp"]:  # dead from its expiry second, as a root mandate is
         raise Reject("EXPIRED", str(child["jti"]), parent)
     number = child["helper_idx"]
     if type(number) is not int or number not in numbers:
