@@ -48,9 +48,12 @@ eval_build:  ## Mint the eval mandates + keys from gateway/state into eval_pack/
 eval_run:  ## Fire the eval cases for questions 0 to 5 at GATEWAY_URL (default localhost:8082)
 	uv run python -m gateway.eval run --pack eval_pack --url $${GATEWAY_URL:-http://localhost:8082}
 
-.PHONY: eval_open preflight
-eval_open:  ## Fire our cases for open questions 7, 10, 11 and 14 at GATEWAY_URL; mints and revokes mandates in gateway/state
+.PHONY: eval_open eval_local preflight
+eval_open:  ## Fire our cases for open questions 6 to 16 at GATEWAY_URL; mints and revokes mandates in gateway/state
 	uv run python -m gateway.eval open --url $${GATEWAY_URL:-http://localhost:8082}
+
+eval_local:  ## Every eval case, questions 0 to 16, on a gateway of its own: no keys or Docker needed, takes a few minutes
+	uv run --extra fastapi --extra gateway python -m gateway.eval local
 
 preflight:  ## Refuse to post a gateway URL while demo routes are visible or questions 0 to 5 fail
 	@set -eu; \

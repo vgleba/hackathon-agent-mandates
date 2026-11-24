@@ -2,11 +2,12 @@
 
     python -m gateway.eval build -o eval_pack            # organiser: mint the mandates + keys from gateway/state
     python -m gateway.eval run --pack eval_pack --url http://localhost:8082
-    python -m gateway.eval open --state gateway/state --url http://localhost:8082   # open questions 7, 10, 11, 14
+    python -m gateway.eval open --state gateway/state --url http://localhost:8082   # open questions 6 to 16
+    python -m gateway.eval local                         # both, against a gateway of its own (make eval_local)
 
 The pack holds no issuer key, so teams can hold it and run the eval against their own gateway. `open` is different:
-it mints from the issuer key and checks this gateway's own design for questions 7, 10, 11 and 14
-(gateway/eval_open.py, docs/questions_4_to_16.md).
+it mints from the issuer key and checks this gateway's own design (docs/questions_4_to_16.md) for questions 7, 10, 11
+and 14 (gateway/eval_open.py) and 6, 8, 9, 12, 13, 15 and 16 (gateway/eval_open_more.py).
 """
 
 import argparse
@@ -14,6 +15,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -207,10 +209,10 @@ def report(results: list[tuple[bool, str]]) -> int:
     return 0 if passed == len(results) else 1
 
 
-def cmd_run(a) -> None:
+def run_scored(pack: Path, url: str) -> int:
     def post(body):
         req = urllib.request.Request(  # noqa: S310
-            f"{a.url}/tools/call", data=json.dumps(body).encode(), headers={"content-type": "application/json"}
+            f"{url}/tools/call", data=json.dumps(body).encode(), headers={"content-type": "application/json"}
         )
         try:
             with urllib.request.urlopen(req) as resp:  # noqa: S310
@@ -218,19 +220,46 @@ def cmd_run(a) -> None:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
-    results = run_cases(a.pack, post)
+    results = run_cases(pack, post)
     code = report(results)
     question_summary(results)
-    sys.exit(code)
+    return code
+
+
+def run_open(state: Path, url: str) -> int:
+    from gateway import eval_open, eval_open_more  # noqa: PLC0415  (they import desk, which build and run do not need)
+
+    print("Questions 6 to 16: this takes a few minutes.", flush=True)
+    post = eval_open.http(url)
+    results = eval_open.run_open(state, post) + eval_open_more.run_more(state, post)
+    code = report(results)
+    questions = {**eval_open.OPEN_QUESTIONS, **eval_open_more.MORE_QUESTIONS}
+    eval_open.question_summary(results, dict(sorted(questions.items())))
+    return code
+
+
+def cmd_run(a) -> None:
+    sys.exit(run_scored(a.pack, a.url))
 
 
 def cmd_open(a) -> None:
-    from gateway import eval_open  # noqa: PLC0415  (it imports desk, which build and run do not need)
+    sys.exit(run_open(a.state, a.url))
 
-    results = eval_open.run_open(a.state, eval_open.http(a.url))
-    code = report(results)
-    eval_open.question_summary(results)
-    sys.exit(code)
+
+def cmd_local(a) -> None:
+    """Throwaway keys, the data server and the gateway on spare ports, every question, and then both are stopped."""
+    from gateway import cli  # noqa: PLC0415
+    from lab import launch  # noqa: PLC0415
+
+    launch.require_free_ports({"data server": a.data_port, "gateway": a.port}, "gateway.eval local")
+    url = f"http://127.0.0.1:{a.port}"
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+        state, pack = Path(folder) / "state", Path(folder) / "pack"
+        cli.main(["--state", str(state), "init"])
+        main(["build", "--state", str(state), "-o", str(pack)])
+        with launch.servers(a.data_port, [(a.port, launch.ROOT)], state):
+            codes = [run_scored(pack, url), run_open(state, url)]
+    sys.exit(max(codes))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -245,10 +274,14 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--pack", type=Path, default=Path("eval_pack"))
     s.add_argument("--url", default="http://localhost:8082")
     s.set_defaults(fn=cmd_run)
-    s = sub.add_parser("open", help="fire our cases for open questions 7, 10, 11 and 14; mints from the issuer state")
+    s = sub.add_parser("open", help="fire our cases for open questions 6 to 16; mints from the issuer state")
     s.add_argument("--state", type=Path, default=Path(os.environ.get("GATEWAY_STATE_DIR", "gateway/state")))
     s.add_argument("--url", default="http://localhost:8082")
     s.set_defaults(fn=cmd_open)
+    s = sub.add_parser("local", help="every question, 0 to 16, against a gateway of its own: no keys, no Docker needed")
+    s.add_argument("--port", type=int, default=18082, help="for the gateway")
+    s.add_argument("--data-port", type=int, default=18080, help="for the data server")
+    s.set_defaults(fn=cmd_local)
     a = p.parse_args(argv)
     a.fn(a)
 

@@ -549,7 +549,7 @@ def http(url: str) -> Post:
     return post
 
 
-def question_summary(results: list[tuple[bool, str]]) -> None:
-    for question, ask in OPEN_QUESTIONS.items():
+def question_summary(results: list[tuple[bool, str]], questions: dict[int, str] = OPEN_QUESTIONS) -> None:
+    for question, ask in questions.items():
         oks = [ok for ok, line in results if line.startswith(f"Q{question} ")]
         print(f'Question {question}: {sum(oks)}/{len(oks)}  "{ask}"')

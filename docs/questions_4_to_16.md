@@ -5,7 +5,8 @@ before and after, start the lab (`python -m lab`) and open **Questions 6 to 16**
 Desk (`python -m desk`). Issue any mandate below with
 `cli issue --agent-key gateway/state/agent.pem --scope '...' --claims '...' -o m.jwt`.
 
-Questions 4 and 5 are scored: `make eval_run` passes 32 of 32.
+Questions 4 and 5 are scored: `make eval_run` passes 32 of 32. Questions 6 to 16 have evals of our own:
+`make eval_local` runs every case against a gateway of its own, and `make eval_open` against the one that is up.
 
 ## Two rules behind all of it
 
