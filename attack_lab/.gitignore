@@ -1,0 +1,10 @@
+# Runtime inputs include a private attack key and posted mandates.
+inputs/*
+!inputs/.gitkeep
+*.pem
+
+# Target URLs should not be committed by accident. Reports live in ../local/.
+targets.local.json
+
+# The repository-wide *.html rule is for rendered presentations; this is source.
+!web/index.html

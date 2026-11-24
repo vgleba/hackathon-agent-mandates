@@ -1,0 +1,29 @@
+{
+  "agent_key": "inputs/attack.pem",
+  "defaults": {
+    "timeout_seconds": 10,
+    "delay_seconds": 0.2
+  },
+  "targets": [
+    {
+      "id": "team-a",
+      "name": "Team A",
+      "gateway_url": "https://team-a-posted-gateway.example",
+      "authorized": true,
+      "mandates": {
+        "default": {
+          "file": "inputs/team-a.default.jwt",
+          "note": "Default Day 2 mandate: SCH01 search and public schools/manifest files."
+        },
+        "feature": {
+          "file": "inputs/team-a.feature.jwt",
+          "note": "Paste the defending team's feature note here.",
+          "expect": {
+            "allow": [],
+            "deny": []
+          }
+        }
+      }
+    }
+  ]
+}

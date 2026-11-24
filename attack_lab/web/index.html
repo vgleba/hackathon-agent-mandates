@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="Local report dashboard for the mandate gateway attack lab">
+    <title>Mandate Attack Lab</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <a class="brand" href="/" aria-label="Mandate Attack Lab home">
+        <span class="brand-mark" aria-hidden="true">M/</span>
+        <span>Mandate Attack Lab</span>
+      </a>
+      <div class="run-state">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="run-meta">Loading report…</span>
+      </div>
+      <a class="button secondary" href="/report.json" download>Download JSON</a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Day 2 / evidence console</p>
+        <h1 id="page-title">Find the boundary.<br><span>Keep the proof.</span></h1>
+        <p class="hero-copy">
+          Every result below came through a posted gateway. Scores are mandate-aware; expand any probe to copy the
+          exact signed request and response.
+        </p>
+      </section>
+
+      <div id="error" class="error-panel hidden" role="alert"></div>
+      <div id="dashboard" class="hidden">
+        <section id="summary" aria-label="Run summary"></section>
+
+        <section class="panel score-panel" aria-labelledby="scoreboard-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">All targets</p>
+              <h2 id="scoreboard-title">Scoreboard</h2>
+            </div>
+            <p>Highest data flag per mandate, plus gateway breaks once per target.</p>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Target</th>
+                  <th>Default</th>
+                  <th>Feature</th>
+                  <th>Breaks</th>
+                  <th>Total</th>
+                  <th>Requests</th>
+                </tr>
+              </thead>
+              <tbody id="scoreboard"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="target-workspace" aria-labelledby="target-title">
+          <nav id="target-nav" class="target-nav" aria-label="Targets"></nav>
+          <div id="target-content"></div>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <p>Local evidence only. Reports may contain synthetic pupil records and signed mandate material.</p>
+      <p>Unseen bonus remains a manual five-minute record check.</p>
+    </footer>
+  </body>
+</html>
