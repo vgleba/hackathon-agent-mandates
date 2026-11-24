@@ -614,8 +614,18 @@ async def tools_call(body: CallBody, http: HttpRequest):
     return JSONResponse(reply, status_code=status)
 
 
-from gateway.demo import demo_enabled  # noqa: E402  (demo imports main lazily)
-from gateway.demo import router as demo_router  # noqa: E402
+try:
+    # here, at the end: demo imports main lazily
+    from gateway.demo import demo_enabled
+    from gateway.demo import router as demo_router
+except ModuleNotFoundError as e:
+    # The production image leaves gateway/demo.py out (.dockerignore, ADR-0001), so no setting can switch it on
+    if e.name != "gateway.demo":
+        raise
+    demo_router = None
+
+    def demo_enabled() -> bool:
+        return False
 
 
 @app.middleware("http")
@@ -631,4 +641,5 @@ async def demo_off_means_absent(request: HttpRequest, call_next):
     return await call_next(request)
 
 
-app.include_router(demo_router)
+if demo_router is not None:
+    app.include_router(demo_router)

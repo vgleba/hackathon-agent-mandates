@@ -4,10 +4,14 @@ export
 # Docker image, terraform and release targets live in platform.mk. Teams never need them.
 -include platform.mk
 
+# The walkthrough UI and the gateway's /demo routes, which sign mandates for anyone who asks. Local only: plain
+# `docker compose` (make run) starts what gets deployed, without them (adr/0001-gateway-image-is-the-security-boundary.md)
+COMPOSE_DEMO = docker compose -f docker-compose.yaml -f docker-compose.demo.yaml
+
 install:
 	cd frontend && npm install
 	uv sync --extra fastapi --extra gateway --extra synth
-	docker compose build 
+	$(COMPOSE_DEMO) build
 
 .PHONY: synth
 synth:  ## Regenerate mcp_server/data/synthetic (pupil census, deprivation, schools, display names) from mcp_server/synth/synth.yaml
@@ -18,15 +22,19 @@ hack: install  ## One command start: keys, one-school mandate, eval pack, contai
 	test -f gateway/state/trusted_list.json || uv run python -m gateway.cli init
 	uv run python -m gateway.cli issue --agent-key gateway/state/agent.pem -o gateway/state/mandate.jwt
 	uv run python -m gateway.eval build -o eval_pack
-	docker compose up -d --wait
+	$(COMPOSE_DEMO) up -d --wait
 	uv run python -m gateway.cli call --mandate gateway/state/mandate.jwt --agent-key gateway/state/agent.pem \
 		--tool search --args '{"query": "P0004", "urn": "SCH01"}'
 
-run:
-	docker compose up -d --wait
+.PHONY: demo run stop
+demo:  ## The walkthrough at localhost:8081/demo, with the gateway's /demo routes on. Local only, never deployed
+	$(COMPOSE_DEMO) up -d --wait
+
+run:  ## What gets deployed: the data server and the gateway, no demo routes and no UI
+	docker compose up -d --wait --remove-orphans
 
 stop:
-	docker compose down
+	$(COMPOSE_DEMO) down
 
 gateway_init:  ## Generate gateway keys, trusted list and status list in gateway/state
 	uv run python -m gateway.cli init

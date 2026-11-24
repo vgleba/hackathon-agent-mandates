@@ -1,0 +1,32 @@
+# Local walkthrough only. Never deploy this file.
+# `make hack` and `make demo` pass it after docker-compose.yaml; `make run` does not. Compose never loads it by itself.
+# It turns on the gateway's /demo routes, which sign mandates for anyone who asks, and starts the UI that calls them.
+# The gateway image leaves gateway/demo.py out (adr/0001-gateway-image-is-the-security-boundary.md), so it is mounted
+# back in here.
+services:
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./frontend/Dockerfile
+    container_name: svelte
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    networks:
+      - agent-mandate-hack-network
+    depends_on:
+      backend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    environment:
+      - BACKEND_URL=http://backend:8080
+      - GATEWAY_URL=http://gateway:8082
+
+  gateway:
+    environment:
+      - GATEWAY_DEMO=1
+    volumes:
+      - ./gateway/demo.py:/app/gateway/demo.py:ro

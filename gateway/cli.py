@@ -108,11 +108,20 @@ def load_people(state: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def write_private(path: Path, data: bytes) -> None:
+    """A private key, readable by its owner only, even where the file was already there with looser rights."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        if hasattr(os, "fchmod"):  # not on Windows, which does not keep these bits anyway
+            os.fchmod(f.fileno(), 0o600)
+        f.write(data)
+
+
 def load_or_create_key(path: Path):
     if path.exists():
         return priv_from_pem(path.read_bytes())
     priv, _ = generate_keypair()
-    path.write_bytes(priv_to_pem(priv))
+    write_private(path, priv_to_pem(priv))
     return priv
 
 
@@ -230,8 +239,8 @@ def cmd_init(a) -> None:
     state.mkdir(parents=True, exist_ok=True)
     issuer_priv, issuer_pub = generate_keypair()
     gateway_priv, gateway_pub = generate_keypair()
-    (state / "issuer_key.pem").write_bytes(priv_to_pem(issuer_priv))
-    (state / "gateway_key.pem").write_bytes(priv_to_pem(gateway_priv))
+    write_private(state / "issuer_key.pem", priv_to_pem(issuer_priv))
+    write_private(state / "gateway_key.pem", priv_to_pem(gateway_priv))
     (state / "gateway.pub").write_bytes(pub_to_pem(gateway_pub))
     trusted = {"issuers": {a.issuer: {a.kid: pub_to_jwk(issuer_pub)}}}
     (state / "trusted_list.json").write_text(json.dumps(trusted, indent=2))

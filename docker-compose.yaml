@@ -1,3 +1,6 @@
+# What gets deployed: the data server and the gateway. `make run` starts exactly this.
+# The walkthrough UI and the gateway's /demo routes, which sign mandates for anyone who asks, are local only:
+# docker-compose.demo.yaml, started by `make hack` and `make demo` (adr/0001-gateway-image-is-the-security-boundary.md).
 services:
 
   backend:
@@ -21,27 +24,6 @@ services:
     networks:
       - agent-mandate-hack-network
 
-  frontend:
-    build:
-      context: .
-      dockerfile: ./frontend/Dockerfile
-    container_name: svelte
-    ports:
-      - "8081:8081"
-    env_file:
-      - .env
-    networks:
-      - agent-mandate-hack-network
-
-    depends_on:
-      backend:
-        condition: service_healthy
-      gateway:
-        condition: service_healthy
-    environment:
-      - BACKEND_URL=http://backend:8080
-      - GATEWAY_URL=http://gateway:8082
-
   gateway:
     build:
       context: .
@@ -54,8 +36,6 @@ services:
     environment:
       - MCP_SERVERS=pupil-data=http://backend:8080/mcp/
       - GATEWAY_STATE_DIR=/app/gateway/state
-      # local only: /demo/* signs mandates for anyone who asks. Remove this line when you deploy
-      - GATEWAY_DEMO=1
       - LITELLM_KEY=${LITELLM_KEY:-}
       - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
     healthcheck:

@@ -54,7 +54,8 @@ What we want at the end is what you found out: where agent mandates hold and whe
    make hack        # keys, a one-school mandate, the eval pack, all containers, and an example signed call
    make eval_run    # every question's cases against your gateway, PASS/FAIL, then a tally per question
    make install     # Installs & rebuilds all containers
-   make run         # Runs containers independently.
+   make demo        # Starts all containers, the demo UI and the gateway's /demo routes included (local only)
+   make run         # Starts what gets deployed: the data server and the gateway, nothing else
    ```
 
 3. Open **[questions/README.md](questions/README.md)**. It lists the questions, 0 to 16. Each starts with something the administrator asks.
@@ -65,10 +66,13 @@ in plain words, approve what it asks, take it back, and see what it saw. **The l
 `http://127.0.0.1:8184`. The gateway before and after our changes, question by question. Neither needs Docker. What each
 question shows is in [docs/questions_4_to_16.md](docs/questions_4_to_16.md).
 
-The `/demo/*` routes sign mandates for anyone who asks, so they are off unless `GATEWAY_DEMO=1`. `docker-compose.yaml`
-sets it for the demo UI. **Remove that line before you deploy.**
+The `/demo/*` routes sign mandates for anyone who asks. The gateway image leaves them out (see
+[.dockerignore](.dockerignore)), and a checkout serves them only with `GATEWAY_DEMO=1`. `make hack` and `make demo` add
+[docker-compose.demo.yaml](docker-compose.demo.yaml), which mounts them back in, switches them on and starts the demo UI.
+`make run` and plain `docker compose` start what gets deployed, without them
+([ADR-0001](adr/0001-gateway-image-is-the-security-boundary.md)).
 
-Ports: MCP server `:8080` (inside Docker only, it has no access control), gateway `:8082`, demo UI `localhost:8081/demo` (a walkthrough of issuing a mandate and making a call - feel free to extend, e.g - for human in the loop escalation.).
+Ports: MCP server `:8080` (inside Docker only, it has no access control), gateway `:8082`, demo UI `localhost:8081/demo` with `make hack` or `make demo` (a walkthrough of issuing a mandate and making a call - feel free to extend, e.g - for human in the loop escalation.).
 `make test` and `make lint` run the tests and ruff. The data sources are listed in
 [mcp_server/data/synthetic/synthetic_manifest.json](mcp_server/data/synthetic/synthetic_manifest.json).
 

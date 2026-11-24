@@ -135,8 +135,9 @@ CHANGES = [
         "title": "Nobody can have the gateway sign for them",
         "question": 2,
         "why": "The demo routes made a mandate for any school, for anyone, with no key. A perfect signature check "
-        "cannot help when the gateway signs whatever it is asked to. They are now off unless switched on.",
-        "files": ["gateway/demo.py", "docker-compose.yaml"],
+        "cannot help when the gateway signs whatever it is asked to. They are now off unless switched on, and the "
+        "gateway image leaves them out, so no deploy setting can switch them on.",
+        "files": ["gateway/demo.py", ".dockerignore", "docker-compose.demo.yaml"],
     },
 ]
 
