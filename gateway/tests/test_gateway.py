@@ -53,6 +53,65 @@ def test_allow_deny_replay_revoke(gw):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
 
 
+def test_bulk_export_is_denied(gw):
+    client, call, _ = gw
+    for arguments, reason in (
+        ({"query": ""}, "QUERY_TOO_BROAD"),
+        ({"query": "  "}, "QUERY_TOO_BROAD"),
+        ({"query": "SPR", "limit": 101}, "LIMIT_NOT_ALLOWED"),
+        ({"query": "SPR", "limit": "5"}, "LIMIT_NOT_ALLOWED"),
+        ({"query": "SPR", "limit": -1}, "LIMIT_NOT_ALLOWED"),
+        ({"query": "SPR", "limit": True}, "LIMIT_NOT_ALLOWED"),
+    ):
+        r, _ = call(client, "search", urn="SCH01", **arguments)
+        assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, reason), arguments
+    r, _ = call(client, "search", urn="SCH01", query="SPR", limit=100)
+    assert r.status_code == 200, r.text
+
+
+def test_path_spellings(gw):
+    client, call, _ = gw
+    for path in ("./" + ev.SCHOOLS, ev.SCHOOLS.replace("/", "//")):
+        r, _ = call(client, "get", path=path)
+        assert r.status_code == 200, path
+        assert r.json()["result"][0]["URN"] == "SCH01"
+    for path, reason in (
+        ("synthetic/x/../synthetic_schools.csv/", "PATH_NOT_ALLOWED"),
+        ("synthetic/../synthetic/synthetic_display_names.csv", "PATH_NOT_ALLOWED"),
+        ("/" + ev.SCHOOLS, "PATH_NOT_ALLOWED"),
+        ("../data/" + ev.SCHOOLS, "PATH_NOT_ALLOWED"),
+        (ev.SCHOOLS + "/../synthetic_display_names.csv", "PATH_NOT_ALLOWED"),
+        (ev.SCHOOLS.upper(), "CONSTRAINT_VIOLATED"),
+        (ev.SCHOOLS + "\x00", "PATH_NOT_ALLOWED"),
+        ("", "PATH_NOT_ALLOWED"),
+        (123, "PATH_NOT_ALLOWED"),
+        ([ev.SCHOOLS], "PATH_NOT_ALLOWED"),
+    ):
+        r, _ = call(client, "get", path=path)
+        assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, reason), path
+
+
+def test_any_scope_entry_may_allow_but_entries_do_not_mix():
+    def check(tool="t", **arguments):
+        req = Request("s", tool, arguments, mandate="", nonce="", ts=0, sig="")
+        scope = [
+            {"server": "s", "tools": ["t", "search"], "constraints": {"urn": ["SCH01"], "path": ["a"]}},
+            {"server": "s", "tools": ["t", "search"], "constraints": {"urn": ["SCH02"], "path": ["b"]}},
+        ]
+        return check_request(req, arguments, [scope], deny=[], step_up_patterns=[])[:2]
+
+    assert check(urn="SCH01", path="a") == ("ALLOW", "IN_SCOPE")
+    assert check(urn="SCH02", path="b") == ("ALLOW", "IN_SCOPE")  # the second entry is tried
+    assert check(urn="SCH01", path="b") == ("DENY", "CONSTRAINT_VIOLATED")  # urn from one, path from the other
+    assert check(urn="SCH03", path="a") == ("DENY", "CONSTRAINT_VIOLATED")
+    assert check(path="a") == ("DENY", "CONSTRAINT_MISSING")
+    assert check(tool="search", query="SPR", urn="SCH02", path="b", limit=101) == (
+        "DENY",
+        "LIMIT_NOT_ALLOWED",
+    )
+    assert check(tool="other", urn="SCH01", path="a") == ("DENY", "OUT_OF_SCOPE")
+
+
 def test_issue_warns_when_entries_for_one_tool_constrain_different_arguments():
     def entry(**constraints):
         return {"server": "pupil-data", "tools": ["pupil"], "constraints": constraints}
