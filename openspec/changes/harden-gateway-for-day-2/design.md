@@ -114,12 +114,11 @@ A test starts the gateway from a directory that holds only the allowlisted files
 
 *Alternative:* an injectable clock object. Passing `now` down is enough, and tests can patch `time.time`.
 
-### D6. The body cap is a pure ASGI middleware, outermost
+### D6. The body cap comes from the framework: `FastAPI(max_body_size=128 KiB)`
 
-- It answers 413 at once when `Content-Length` is over 128 KiB.
-- Otherwise it wraps `receive`, counts the bytes in each `http.request` chunk, and answers 413 once the total passes the cap. FastAPI reads the whole body before it responds, so no response has started at that point.
-- It applies to every route and sits outside the `26125b3` demo middleware.
-- It is pure ASGI rather than `@app.middleware("http")`, because `BaseHTTPMiddleware` makes counting the streamed body awkward.
+- FastAPI 0.165 and Starlette 1.10 take `max_body_size` and add their own pure-ASGI limiter in front of every route.
+- It answers 413 at once when `Content-Length` is over the cap. Otherwise it counts the streamed bytes and answers 413 once the total passes the cap, before JSON parsing or the request models.
+- This replaces the hand-written middleware planned here: the framework's version does the same thing and is maintained with it. Tests pin the behaviour, including a chunked body with no `Content-Length`.
 
 *Alternatives:*
 - An ingress limit: whether the platform has one is unknown.
@@ -131,6 +130,7 @@ A test starts the gateway from a directory that holds only the allowlisted files
 
 - `CallBody` and `PersonBody` declare `Field(max_length=…)`, and `min_length=1` for `nonce`, using the values in the `request-size-limits` spec.
 - Anything over a limit gets a 422 from the existing `wrong_shape` handler, before any hashing, verification, logging or storage.
+- Person requests also cap `hold` (128), `answer` (16), `root` (256) and `urn` (16).
 - `LONGEST` moves from `delegation.py` to `gateway/lib/common.py` as `MAX_MANDATE`, and is used in three places:
   - the `mandate` field limit;
   - a length check at the top of `Gateway.verify`, for in-process callers such as the eval, the lab and Desk;

@@ -5,13 +5,14 @@ One gateway process owns the file.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import sqlite3
 import threading
 import time
 
-NONCE_LIFE = 900         # longer than a request can stay fresh: 300s either side of now
+NONCE_LIFE = 900         # longer than the oldest request the gateway accepts (300s)
 HOLD_LIFE = 8 * 3600     # a school day
 MAX_WAITING = 20         # calls one job may have waiting, so nobody is worn down into approving
 
@@ -36,6 +37,7 @@ class Store:
         self.db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, timeout=10)
         self.lock = threading.RLock()
         self.db.executescript(TABLES)
+        self._transaction(self._digest_old_nonces)
         # whatever was running when the gateway stopped: nobody can say if it happened, so it is never tried again
         self.db.execute("UPDATE holds SET state = 'unknown' WHERE state = 'running'")
 
@@ -55,13 +57,25 @@ class Store:
 
     # ------------------------------------------------------------ nonces
 
+    def _digest_old_nonces(self) -> None:
+        """Upgrade raw nonce rows once, without opening a replay window during deployment."""
+        if self.db.execute("PRAGMA user_version").fetchone()[0] >= 1:
+            return
+        rows = self.db.execute("SELECT who, nonce, ts FROM nonces").fetchall()
+        self.db.execute("DELETE FROM nonces")
+        self.db.executemany(
+            "INSERT OR IGNORE INTO nonces VALUES (?, ?, ?)",
+            [(who, hashlib.sha256(nonce.encode()).hexdigest(), ts) for who, nonce, ts in rows],
+        )
+        self.db.execute("PRAGMA user_version = 1")
+
     def use_nonce(self, who: str, nonce: str) -> bool:
         """True the first time `who` uses this nonce."""
-        now = time.time()
+        now, digest = time.time(), hashlib.sha256(nonce.encode()).hexdigest()
 
         def work():
             self.db.execute("DELETE FROM nonces WHERE ts < ?", (now - NONCE_LIFE,))
-            return self.db.execute("INSERT OR IGNORE INTO nonces VALUES (?, ?, ?)", (who, nonce, now)).rowcount == 1
+            return self.db.execute("INSERT OR IGNORE INTO nonces VALUES (?, ?, ?)", (who, digest, now)).rowcount == 1
 
         return self._transaction(work)
 

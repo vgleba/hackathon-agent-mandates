@@ -223,7 +223,7 @@ def test_a_very_deep_chain_is_refused_quickly(pair):
     for _ in range(12):
         token = pair.child(parent=token)
     start = time.time()
-    assert pair.call(token)[0] == 403
+    assert pair.call(token)[0] in {403, 422}  # the HTTP field cap may refuse it before JWT decoding
     assert time.time() - start < 2
 
 

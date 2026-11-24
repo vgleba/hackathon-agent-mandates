@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, fields
 import jwt
 
 from . import delegation, paths, volume
-from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
+from .common import MAX_MANDATE, canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from .errors import Reject
 from .record import safe_text
 from .status_list import is_revoked
@@ -216,6 +216,8 @@ class Gateway:
     def verify(self, token: str, now: float | None = None) -> dict:
         """Is this mandate good at `now` (by default, right now)? Returns its claims, or raises Reject."""
         now = time.time() if now is None else now
+        if not isinstance(token, str) or len(token) > MAX_MANDATE:
+            raise Reject("WRONG_TOKEN_TYPE", "too long to be a mandate")
         try:
             child = delegation.is_child(token)
         except jwt.PyJWTError as e:

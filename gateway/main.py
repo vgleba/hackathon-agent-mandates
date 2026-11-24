@@ -23,12 +23,20 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from gateway.cli import person_message, sign_request
 from gateway.lib import disclosure, policy, volume
 from gateway.lib import record as records
-from gateway.lib.common import b64u_decode, generate_keypair, jwk_to_pub, priv_from_pem, pub_to_jwk, verify_bytes
+from gateway.lib.common import (
+    MAX_MANDATE,
+    b64u_decode,
+    generate_keypair,
+    jwk_to_pub,
+    priv_from_pem,
+    pub_to_jwk,
+    verify_bytes,
+)
 from gateway.lib.errors import Reject
 from gateway.lib.gateway_verify import OWN_SERVER, Decision, Gateway, Request
 from gateway.lib.record import NOBODY, Record, safe_arguments, safe_text
@@ -44,19 +52,20 @@ state: dict = {}
 log = logging.getLogger(__name__)
 READ_TRIES = 30
 FRESH = 300  # seconds a signed request stays good
+MAX_BODY = 128 * 1024
 URN = re.compile(r"SCH(0[1-9]|1[0-2])")
 THIS_TERM = {"academic_year": "2023/24", "term": "SPR"}  # the latest in the data
 PUPIL_ID = re.compile(r"P\d{4}")
 
 
 class CallBody(BaseModel):
-    server: str
-    tool: str
+    server: str = Field(max_length=64)
+    tool: str = Field(max_length=64)
     arguments: dict
-    mandate: str
-    nonce: str
+    mandate: str = Field(max_length=MAX_MANDATE)
+    nonce: str = Field(min_length=1, max_length=128)
     ts: int
-    sig: str
+    sig: str = Field(max_length=128)
 
 
 def load_state(state_dir: Path) -> None:
@@ -76,7 +85,9 @@ async def lifespan(_app: FastAPI):
     store.close()
 
 
-app = FastAPI(title="mandate gateway", lifespan=lifespan)
+# Starlette's pure-ASGI limiter checks Content-Length and also counts streamed bytes,
+# before FastAPI parses JSON or constructs one of the request models.
+app = FastAPI(title="mandate gateway", lifespan=lifespan, max_body_size=MAX_BODY)
 
 
 @app.exception_handler(RequestValidationError)
@@ -376,16 +387,16 @@ def collect(decision: Decision, req: Request, source: str) -> tuple[int, dict]:
 class PersonBody(BaseModel):
     """Signed by a person's own key. Who they are comes from the signature: there is no 'whose' to change."""
 
-    principal: str
-    nonce: str
+    principal: str = Field(max_length=128)
+    nonce: str = Field(min_length=1, max_length=128)
     ts: int
-    sig: str
-    hold: str | None = None
-    answer: str | None = None
+    sig: str = Field(max_length=128)
+    hold: str | None = Field(default=None, max_length=128)
+    answer: str | None = Field(default=None, max_length=16)
     names: bool | None = None
-    root: str | None = None
+    root: str | None = Field(default=None, max_length=256)
     seq: int | None = None
-    urn: str | None = None
+    urn: str | None = Field(default=None, max_length=16)
     year: int | None = None
 
 

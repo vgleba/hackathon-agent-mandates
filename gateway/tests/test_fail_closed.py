@@ -97,7 +97,7 @@ MANDATE = {"typ": "mandate+jwt", "alg": "EdDSA"}
         ({"typ": BROKEN, "alg": "EdDSA"}, {"iss": "x"}, "WRONG_TOKEN_TYPE"),
         ({"typ": {"a": [BROKEN]}, "alg": "EdDSA"}, {"iss": "x"}, "WRONG_TOKEN_TYPE"),
         (MANDATE, {"iss": BROKEN}, "ISSUER_NOT_ACCREDITED"),
-        (MANDATE, {"iss": BROKEN * 5000}, "ISSUER_NOT_ACCREDITED"),
+        (MANDATE, {"iss": BROKEN * 3000}, "ISSUER_NOT_ACCREDITED"),
         (MANDATE, {"iss": "x" * 5000}, "ISSUER_NOT_ACCREDITED"),
     ],
 )

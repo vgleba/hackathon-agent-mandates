@@ -29,6 +29,7 @@ The limits are:
 - `sig`: 128 characters
 - `principal`: 128 characters
 - `mandate`: 32,000 characters
+- on person requests, `hold`: 128, `answer`: 16, `root`: 256 and `urn`: 16 characters
 
 #### Scenario: Long nonce
 - **WHEN** a call carries a 129-character nonce
@@ -39,8 +40,12 @@ The limits are:
 - **THEN** the gateway answers 422
 
 #### Scenario: Fields at their limits
-- **WHEN** every field is exactly at its limit and the call is otherwise valid
-- **THEN** the gateway decides it as usual
+- **WHEN** a field is exactly at its limit
+- **THEN** the gateway decides the call as usual, without a 422
+
+#### Scenario: Person name one over its limit
+- **WHEN** a person request carries a 129-character `principal`
+- **THEN** the gateway answers 422
 
 ### Requirement: Root and child mandates share one length cap
 The gateway SHALL refuse a root mandate longer than 32,000 characters without decoding it, as it already does for a child mandate.

@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import jwt
 
-from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem
+from .common import MAX_MANDATE, canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem
 from .errors import Reject
 
 CHILD_TYP = "mandate-child+jwt"
-LONGEST = 32_000
 # everything else comes from the parent: person, purpose, clearance, budget
 MAY_SET = {"parent", "scope", "deny", "exp", "cnf", "jti", "helper_idx"}
 NEEDED = ["parent", "scope", "exp", "cnf", "jti", "helper_idx"]
@@ -47,7 +46,7 @@ def narrower(child: dict, parent: dict) -> bool:
 
 def verify_child(token: str, verify_root, helper_revoked, now: float) -> dict:
     """Returns the claims the helper acts under at `now`, the decision's one reading of the clock, or raises Reject."""
-    if len(token) > LONGEST:
+    if len(token) > MAX_MANDATE:
         raise Reject("WRONG_TOKEN_TYPE", "too long to be a mandate")
     parent_token = jwt.decode(token, options={"verify_signature": False}).get("parent")
     if not isinstance(parent_token, str):

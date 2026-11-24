@@ -38,7 +38,7 @@
 
 ## 4. Size limits (RT-03; D6, D7, D8)
 
-- [ ] 4.1 Add failing tests:
+- [x] 4.1 Add failing tests:
   - a body of exactly 128 KiB minus one byte (decided as usual) and one over 128 KiB (413);
   - a chunked body past the cap (413);
   - an oversized body on each person route (413);
@@ -47,11 +47,11 @@
   - a root mandate of 32,001 characters (4xx, not decoded);
   - a 64-character stored nonce digest;
   - arguments nested 5,000 deep (4xx), with the next request still answered
-- [ ] 4.2 Add a pure ASGI body-cap middleware, outermost: refuse at once when `Content-Length` is over the cap, and count streamed `http.request` bytes otherwise
-- [ ] 4.3 Move `LONGEST` to `gateway/lib/common.py` as `MAX_MANDATE`. Use it for the `CallBody.mandate` limit, a length check at the top of `Gateway.verify`, and `delegation.verify_child`
-- [ ] 4.4 Add `Field` length limits to `CallBody` and `PersonBody`, with the values from the `request-size-limits` spec
-- [ ] 4.5 Store `sha256(nonce)` as hex in `Store.use_nonce`
-- [ ] 4.6 Run `gateway/tests/test_fail_closed.py` and the full suite, and confirm no case answers 500
+- [x] 4.2 Cap request bodies with `FastAPI(max_body_size=MAX_BODY)` (design D6): it refuses at once when `Content-Length` is over the cap, and counts streamed bytes otherwise
+- [x] 4.3 Move `LONGEST` to `gateway/lib/common.py` as `MAX_MANDATE`. Use it for the `CallBody.mandate` limit, a length check at the top of `Gateway.verify`, and `delegation.verify_child`
+- [x] 4.4 Add `Field` length limits to `CallBody` and `PersonBody`, with the values from the `request-size-limits` spec
+- [x] 4.5 Store `sha256(nonce)` as hex in `Store.use_nonce`
+- [x] 4.6 Run `gateway/tests/test_fail_closed.py` and the full suite, and confirm no case answers 500
 
 ## 5. Restarts and replicas (RT-04; D9)
 
