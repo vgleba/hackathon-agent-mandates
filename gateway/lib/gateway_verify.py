@@ -108,7 +108,7 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str], now: floa
     if sl_jwt is None:
         raise Reject("STATUS_UNAVAILABLE", sl["uri"], claims)     # fail closed
     try:
-        if is_revoked(sl_jwt, sl["idx"], pub, sl["uri"]):
+        if is_revoked(sl_jwt, sl["idx"], pub, sl["uri"], now):
             raise Reject("REVOKED", claims["jti"], claims)
     except ValueError as e:
         raise Reject("STATUS_UNAVAILABLE", str(e), claims) from e
@@ -234,11 +234,11 @@ class Gateway:
         claims = verify_mandate(token, self.registry, self.status_lists, now)
         return {**claims, "_kid": jwt.get_unverified_header(token).get("kid", "")}
 
-    def _helper_revoked(self, parent: dict, number: int) -> bool:
+    def _helper_revoked(self, parent: dict, number: int, now: float) -> bool:
         sl = parent["status"]["status_list"]
         try:
             return is_revoked(self.status_lists[sl["uri"]], number, self.registry.issuer_key(parent["iss"], parent["_kid"]),
-                              sl["uri"])
+                              sl["uri"], now)
         except (KeyError, ValueError) as e:
             raise Reject("STATUS_UNAVAILABLE", "cannot tell if this helper was stopped", parent) from e
 

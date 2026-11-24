@@ -84,7 +84,7 @@ def verify_child(token: str, verify_root, helper_revoked, now: float) -> dict:
     number = child["helper_idx"]
     if type(number) is not int or number not in numbers:
         raise Reject("DELEGATION_NOT_ALLOWED", "not one of the helpers that were set aside", parent)
-    if helper_revoked(parent, number):
+    if helper_revoked(parent, number, now):
         raise Reject("REVOKED", str(child["jti"]), parent)
 
     # start from the parent, so that nothing but what is named here can differ

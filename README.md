@@ -282,3 +282,16 @@ one, then a narrower mandate issued, used and revoked. Open it in VS Code, or ru
 For a model-driven agent, give the model `call` as its tool. The agent loop is yours to write.
 
 `GET localhost:8082/describe` lists the tools and the signing rules, with a worked example.
+
+## Day 2 deployment checklist
+
+1. Start from fresh issuer state for the public deployment; do not reuse state that was ever exposed with demo mode.
+2. Run `make eval_build`, then issue the default and feature mandates with `make attack_mandates` before building.
+3. Keep `gateway/state/issuer_key.pem`, agent keys and person keys on the issuing laptop. Never publish or commit them.
+4. Expose only the gateway. Port 8080 is the unauthenticated data server and must remain private.
+5. Deploy one gateway replica with persistent state. Separate replicas with separate SQLite files split replay and
+   budget state.
+6. Before posting the URL, run `GATEWAY_URL=https://… make preflight` from another machine. It requires all five
+   `/demo/*` routes to be absent and questions 0 to 5 to pass.
+7. Call `/healthcheck` several times. The `instance` value should stay constant; changes indicate restarts or multiple
+   replicas and require checking the deployment before the attack starts.

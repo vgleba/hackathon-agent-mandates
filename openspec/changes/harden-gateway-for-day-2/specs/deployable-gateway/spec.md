@@ -64,12 +64,13 @@ This covers the issuer, gateway, agent and person keys.
 - **THEN** the new file has mode `0600`
 
 ### Requirement: Preflight check before posting the gateway URL
-`make preflight GATEWAY_URL=<url>` SHALL fail unless every `/demo/*` route on that URL refuses and questions 0 to 5 pass there.
+`make preflight GATEWAY_URL=<url>` SHALL fail unless every `/demo/*` route on that URL answers 404 and questions 0 to 5 pass there.
+It probes with GET only, so it never mints or revokes, even against a gateway where the demo is live.
 
 #### Scenario: Demo route reachable
-- **WHEN** preflight runs and any of the five `/demo/*` routes answers with a 2xx status
+- **WHEN** preflight runs and any of the five `/demo/*` routes answers anything but 404
 - **THEN** preflight prints that route and its status, and exits non-zero
 
 #### Scenario: Deployed gateway is clean and correct
-- **WHEN** every `/demo/*` route refuses and `make eval_run` passes questions 0 to 5 against the URL
+- **WHEN** every `/demo/*` route answers 404 and `make eval_run` passes questions 0 to 5 against the URL
 - **THEN** preflight exits zero

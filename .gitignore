@@ -69,5 +69,8 @@ eval_pack/
 
 .tmp/
 
+# Local-only notes and artifacts
+local/
+
 # MCP server write tool output
 mcp_server/data/writes/

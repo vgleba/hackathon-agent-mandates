@@ -55,3 +55,27 @@ The hold lapses at the mandate's `exp`, and release checks the mandate's expiry 
 - **WHEN** a person approves a held call at or after the mandate's `exp`
 - **THEN** the approval is refused with reason code `HOLD_NOT_WAITING`, because the hold has lapsed, and the call is not run
 - **AND** the agent collecting it with that mandate gets `DENY` with reason code `EXPIRED`
+
+### Requirement: A status list is judged at the decision's time
+The gateway MUST judge a status list's freshness against the decision's one reading of the clock.
+It allows a publisher clock up to 30 seconds fast, treats the list as stale from `iat + ttl`, and refuses an index that is negative or out of range.
+
+#### Scenario: Publisher clock thirty seconds fast
+- **WHEN** a status list's `iat` is 30 seconds after the decision time
+- **THEN** the list is accepted
+
+#### Scenario: Publisher clock more than thirty seconds fast
+- **WHEN** a status list's `iat` is 31 seconds after the decision time
+- **THEN** the list is refused as unreadable, and calls that need it get `STATUS_UNAVAILABLE`
+
+#### Scenario: Stale at its time-to-live
+- **WHEN** the decision time reaches the list's `iat + ttl`
+- **THEN** the list is refused as stale
+
+### Requirement: A torn status-list read never replaces a good one
+The gateway MUST verify a newly read status list's signature before it replaces the list in use.
+It reads the file again when the signature fails.
+
+#### Scenario: Complete-looking read with a torn signature
+- **WHEN** a read of `status_list.jwt` still decodes and decompresses but its signature does not verify, and a mandate in it is revoked
+- **THEN** the gateway reads the file again and answers `REVOKED`, not `STATUS_UNAVAILABLE`

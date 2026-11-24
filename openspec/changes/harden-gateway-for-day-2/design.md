@@ -179,10 +179,17 @@ On Windows the mode bits are mostly ignored; the test skips there.
 ### D12. Preflight
 
 `make preflight GATEWAY_URL=…` checks the deployed gateway from outside, in two steps:
-1. A POSIX `sh` loop sends `GET /demo/issuer`, `GET /demo/trust`, and `POST /demo/mandate`, `/demo/call` and `/demo/revoke` with JSON bodies. It prints each status and fails on any 2xx.
+1. A POSIX `sh` loop sends a GET to each of the five `/demo/*` routes, prints each status, and fails on anything but 404. A GET never mints or revokes, even on a gateway where the demo is live; a POST to `/demo/mandate` would. With the demo off, the `26125b3` middleware answers 404 to any method, and with it on, a GET to a POST route gets 405, which also fails.
 2. It then runs `$(MAKE) eval_run`.
 
 It runs from a team laptop against the AWS URL, which counts as "another machine".
+
+### D13. Status lists are judged at the decision's time, and checked before they replace the snapshot
+
+- `validate_status_list` verifies and unpacks a status list against the decision's `now`, with its own 30-second allowance for a publisher clock running fast (`STATUS_CLOCK_SKEW`). PyJWT's `iat` check is off, for the same reason as in D5. A list is stale from `iat + ttl`.
+- `is_revoked` and the helper check take the decision's `now`, and refuse a negative or out-of-range index.
+- `whole_status_list` now verifies the signature before a newly read list replaces the current one. A torn bind-mount read can still be valid JSON, JWT and zlib, and would otherwise briefly turn a known revocation into `STATUS_UNAVAILABLE`.
+- Without this, revoking from a laptop whose clock runs ahead of the AWS gateway would make the gateway refuse every call until the clocks agreed.
 
 ## Risks / Trade-offs
 

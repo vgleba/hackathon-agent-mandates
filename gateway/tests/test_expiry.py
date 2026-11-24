@@ -13,6 +13,7 @@ import pytest
 from gateway import cli, main
 from gateway.lib.common import priv_to_pem
 from gateway.lib.gateway_verify import Request
+from gateway.lib.status_list import is_revoked
 from mcp_server.api import routes_mcp
 
 from .conftest import JSMITH, entry
@@ -48,6 +49,11 @@ def resigned(token: str, issuer_key, **changes) -> str:
     """The same mandate with some claims changed, signed again by the real issuer: as a fast issuer clock makes it."""
     claims = {**jwt.decode(token, options={"verify_signature": False}), **changes}
     return jwt.encode(claims, priv_to_pem(issuer_key), algorithm="EdDSA", headers=jwt.get_unverified_header(token))
+
+
+def resigned_status(token: str, issuer_key, **changes) -> str:
+    claims = {**jwt.decode(token, options={"verify_signature": False}), **changes}
+    return jwt.encode(claims, priv_to_pem(issuer_key), algorithm="EdDSA", headers={"typ": "statuslist+jwt"})
 
 
 # ------------------------------------------------------------ root mandates
@@ -103,6 +109,40 @@ def test_a_mandate_forty_seconds_from_starting_is_not_yet_valid(world, clock, is
     mandate, claims = issued(world)
     ahead = resigned(mandate, issuer_key, iat=claims["iat"] + 40, nbf=claims["nbf"] + 40)
     assert at(world, clock, claims["nbf"], ahead)[:2] == (403, "NOT_YET_VALID")
+
+
+# ------------------------------------------------------------ status-list time
+
+
+def test_a_status_publisher_clock_thirty_seconds_fast_is_tolerated(world, issuer_key):
+    token = (world.state / "status_list.jwt").read_text()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    ahead = resigned_status(token, issuer_key, iat=claims["iat"] + 30)
+    assert not is_revoked(ahead, 0, issuer_key.public_key(), claims["sub"], now=claims["iat"])
+
+
+def test_a_status_list_more_than_thirty_seconds_from_publication_is_refused(world, issuer_key):
+    token = (world.state / "status_list.jwt").read_text()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    ahead = resigned_status(token, issuer_key, iat=claims["iat"] + 31)
+    with pytest.raises(ValueError, match="future"):
+        is_revoked(ahead, 0, issuer_key.public_key(), claims["sub"], now=claims["iat"])
+
+
+def test_a_status_list_is_stale_from_its_ttl_boundary(world, issuer_key):
+    token = (world.state / "status_list.jwt").read_text()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    short = resigned_status(token, issuer_key, iat=100, ttl=10)
+    assert not is_revoked(short, 0, issuer_key.public_key(), claims["sub"], now=109.999)
+    with pytest.raises(ValueError, match="stale"):
+        is_revoked(short, 0, issuer_key.public_key(), claims["sub"], now=110)
+
+
+def test_a_negative_status_index_is_refused(world, issuer_key):
+    token = (world.state / "status_list.jwt").read_text()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    with pytest.raises(ValueError, match="range"):
+        is_revoked(token, -1, issuer_key.public_key(), claims["sub"], now=claims["iat"])
 
 
 # ------------------------------------------------------------ one decision, one second

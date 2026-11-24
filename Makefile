@@ -48,8 +48,19 @@ eval_build:  ## Mint the eval mandates + keys from gateway/state into eval_pack/
 eval_run:  ## Fire the eval cases for questions 0 to 5 at GATEWAY_URL (default localhost:8082)
 	uv run python -m gateway.eval run --pack eval_pack --url $${GATEWAY_URL:-http://localhost:8082}
 
+.PHONY: eval_open preflight
 eval_open:  ## Fire our cases for open questions 7, 10, 11 and 14 at GATEWAY_URL; mints and revokes mandates in gateway/state
 	uv run python -m gateway.eval open --url $${GATEWAY_URL:-http://localhost:8082}
+
+preflight:  ## Refuse to post a gateway URL while demo routes are visible or questions 0 to 5 fail
+	@set -eu; \
+	url="$${GATEWAY_URL:-http://localhost:8082}"; \
+	for route in issuer trust mandate call revoke; do \
+		code=$$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' "$$url/demo/$$route"); \
+		echo "GET /demo/$$route: $$code"; \
+		[ "$$code" = 404 ] || { echo "unsafe: /demo/$$route is present"; exit 1; }; \
+	done
+	$(MAKE) eval_run
 
 attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if FEATURE_SCOPE/FEATURE_CLAIMS are set, to each day_2_attack/keys/<team>.jwk
 	mkdir -p day_2_attack/keys day_2_attack/mandates

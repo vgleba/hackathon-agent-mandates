@@ -12,12 +12,10 @@ import os
 import re
 import secrets
 import time
-import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import jwt
 from fastapi import FastAPI
 from fastapi import Request as HttpRequest
 from fastapi.exceptions import RequestValidationError
@@ -31,7 +29,6 @@ from gateway.lib import disclosure, policy, volume
 from gateway.lib import record as records
 from gateway.lib.common import (
     MAX_MANDATE,
-    b64u_decode,
     generate_keypair,
     jwk_to_pub,
     priv_from_pem,
@@ -41,6 +38,7 @@ from gateway.lib.common import (
 from gateway.lib.errors import Reject
 from gateway.lib.gateway_verify import CLOCK_SKEW, OWN_SERVER, Decision, Gateway, Request
 from gateway.lib.record import NOBODY, Record, safe_arguments, safe_text
+from gateway.lib.status_list import validate_status_list
 from gateway.lib.store import Full, Store
 from gateway.lib.trust_registry import TrustedList
 
@@ -75,7 +73,9 @@ def load_state(state_dir: Path) -> None:
     state["record"] = Record(state_dir / "record.jsonl", priv_from_pem((state_dir / "gateway_key.pem").read_bytes()))
     state["store"] = Store(state_dir / "gateway.db")
     state["gateway"] = Gateway(registry, status_lists={}, store=state["store"], started=started)
-    state["status_uri"] = json.loads((state_dir / "status_list.json").read_text())["uri"]
+    status = json.loads((state_dir / "status_list.json").read_text())
+    state["status_uri"] = status["uri"]
+    state["status_pub"] = registry.issuer_key(status["issuer"], status["kid"])
     state["dir"] = state_dir
     state["started"] = started
     state["instance"] = secrets.token_hex(8)
@@ -155,15 +155,15 @@ def read_shared(name: str) -> str:
 
 
 def whole_status_list(text: str) -> bool:
-    """Does this read look like a whole status list? Checked without the issuer's key, which is_revoked uses after.
+    """Is this a complete, authentic, current read of the configured status list?
 
     Read through a container's shared folder while `cli revoke` is replacing the file, the text can come back cut
-    short or mixed for a moment, even though the replacement itself is atomic.
+    short or mixed for a moment, even though the replacement itself is atomic. A mixed read may still be valid JSON,
+    JWT and zlib, so the signature must be checked before it replaces the current snapshot.
     """
     try:
-        claims = jwt.decode(text, options={"verify_signature": False})
-        zlib.decompress(b64u_decode(claims["status_list"]["lst"]))
-    except Exception:  # noqa: BLE001  (anything that does not decode is not whole)
+        validate_status_list(text, state["status_pub"], state["status_uri"])
+    except (KeyError, ValueError):
         return False
     return True
 

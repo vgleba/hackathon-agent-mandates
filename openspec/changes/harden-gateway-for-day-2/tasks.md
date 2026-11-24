@@ -80,9 +80,9 @@
 
 ## 7. Preflight and Day 2 runbook (D12, Migration Plan)
 
-- [ ] 7.1 Add `make preflight GATEWAY_URL=…`. It requests the five `/demo/*` routes, prints each status and fails on any 2xx, then runs `$(MAKE) eval_run`
+- [x] 7.1 Add `make preflight GATEWAY_URL=…`. It requests the five `/demo/*` routes, prints each status and fails on any 2xx, then runs `$(MAKE) eval_run`
 - [ ] 7.2 Check preflight locally: it passes against `make run`, and fails against `make demo` naming each open route
-- [ ] 7.3 Add a Day 2 section to the README:
+- [x] 7.3 Add a Day 2 section to the README:
   1. Move the development state aside, then run `make gateway_init`.
   2. Run `make eval_build`.
   3. Run `make attack_mandates` before the image is built.

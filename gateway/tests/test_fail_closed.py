@@ -247,6 +247,22 @@ def test_a_status_list_read_half_written_is_read_again(gw, monkeypatch):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
 
 
+def test_a_complete_looking_status_list_with_a_torn_signature_is_read_again(gw, monkeypatch):
+    client, key, mandate, state = gw
+    cli.revoke_mandate(state, jwt.decode(mandate, options={"verify_signature": False})["status"]["status_list"]["idx"])
+    real, torn = Path.read_text, iter([True] * 3)
+
+    def read_text(self, *a, **k):
+        text = real(self, *a, **k)
+        if self.name == "status_list.jwt" and next(torn, False):
+            return text[:-3] + "AAA"  # still decodes and decompresses, but is not what the issuer signed
+        return text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    r = good_call(client, key, mandate)
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
+
+
 @pytest.mark.parametrize(
     "spoil",
     [
