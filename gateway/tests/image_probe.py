@@ -2,7 +2,7 @@
 
 Run in an interpreter of its own, so that the test process keeps its gateway with the demo in it:
 
-    python -m gateway.tests.image_probe <state dir> <signed call as JSON>
+    python -m gateway.tests.image_probe <state dir> <call as JSON> <agent private key>
 
 Prints one line of JSON: the status of each /demo route, and the status and decision of the call.
 """
@@ -10,6 +10,7 @@ Prints one line of JSON: the status of each /demo route, and the status and deci
 import json
 import os
 import sys
+from pathlib import Path
 
 DEMO_ROUTES = [
     ("GET", "/demo/issuer", None),
@@ -28,11 +29,21 @@ def probe() -> None:
 
     from fastapi.testclient import TestClient  # noqa: PLC0415  (only once the demo is blocked)
 
-    from gateway import main  # noqa: PLC0415
+    from gateway import cli, main  # noqa: PLC0415
+    from gateway.lib.common import priv_from_pem  # noqa: PLC0415
     from mcp_server.api.routes_mcp import mcp  # noqa: PLC0415
 
     main.MCP_SERVERS["pupil-data"] = mcp
     with TestClient(main.app, raise_server_exceptions=False) as client:
+        # Model an external agent signing after this process starts. The key path is supplied by the test harness;
+        # it is not present in the production image whose contents this probe checks.
+        call = cli.sign_request(
+            priv_from_pem(Path(sys.argv[3]).read_bytes()),
+            server=call["server"],
+            tool=call["tool"],
+            arguments=call["arguments"],
+            mandate=call["mandate"],
+        )
         demo = {
             f"{method} {path}": client.request(method, path, json=body).status_code
             for method, path, body in DEMO_ROUTES

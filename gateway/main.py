@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import zlib
 from contextlib import asynccontextmanager
@@ -38,7 +39,7 @@ from gateway.lib.common import (
     verify_bytes,
 )
 from gateway.lib.errors import Reject
-from gateway.lib.gateway_verify import OWN_SERVER, Decision, Gateway, Request
+from gateway.lib.gateway_verify import CLOCK_SKEW, OWN_SERVER, Decision, Gateway, Request
 from gateway.lib.record import NOBODY, Record, safe_arguments, safe_text
 from gateway.lib.store import Full, Store
 from gateway.lib.trust_registry import TrustedList
@@ -69,12 +70,15 @@ class CallBody(BaseModel):
 
 
 def load_state(state_dir: Path) -> None:
+    started = time.time()
     registry = TrustedList(json.loads((state_dir / "trusted_list.json").read_text()))
     state["record"] = Record(state_dir / "record.jsonl", priv_from_pem((state_dir / "gateway_key.pem").read_bytes()))
     state["store"] = Store(state_dir / "gateway.db")
-    state["gateway"] = Gateway(registry, status_lists={}, store=state["store"])
+    state["gateway"] = Gateway(registry, status_lists={}, store=state["store"], started=started)
     state["status_uri"] = json.loads((state_dir / "status_list.json").read_text())["uri"]
     state["dir"] = state_dir
+    state["started"] = started
+    state["instance"] = secrets.token_hex(8)
 
 
 @asynccontextmanager
@@ -101,7 +105,7 @@ async def wrong_shape(_request: HttpRequest, exc: RequestValidationError):
 
 @app.get("/healthcheck")
 def healthcheck() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "instance": state["instance"], "started": int(state["started"])}
 
 
 @app.get("/describe")
@@ -406,8 +410,10 @@ def verify_person(body: PersonBody, do: str, code: str, *fields: str) -> dict:
         person = people().get(body.principal) or {}
         given = {f: getattr(body, f) for f in fields if getattr(body, f) is not None}
         message = person_message(body.principal, do, body.nonce, body.ts, given)
+        now = time.time()
         good = (
-            abs(body.ts - time.time()) <= FRESH
+            int(state["started"]) <= body.ts
+            and now - FRESH <= body.ts <= now + CLOCK_SKEW
             and "jwk" in person
             and verify_bytes(jwk_to_pub(person["jwk"]), message, body.sig)
             and state["store"].use_nonce(f"person:{body.principal}", body.nonce)

@@ -55,16 +55,16 @@
 
 ## 5. Restarts and replicas (RT-04; D9)
 
-- [ ] 5.1 Add failing tests:
+- [x] 5.1 Add failing tests:
   - a request accepted before a restart and replayed after it, on the same state and with `gateway.db` deleted (`POP_FAILED`);
   - `ts` at +31 seconds (`POP_FAILED`) and +20 seconds (accepted);
   - `ts` 290 seconds old but after start (accepted);
   - a `/holds/answer` signed before start (refused, nothing approved);
   - `/healthcheck` returns the same instance within one process and a different one after a restart;
   - two app instances on one state directory refuse each other's nonces
-- [ ] 5.2 Record `started` and `instance` in `load_state`
-- [ ] 5.3 Apply the start-time floor (`ts < int(started)`) and the 30-second future limit in `Gateway.decide` and `verify_person`. The past side of the window stays at 300 seconds
-- [ ] 5.4 Have `/healthcheck` return `instance` and `started`. Add a README line on spotting replicas and restarts, by calling it a few times from outside
+- [x] 5.2 Record `started` and `instance` in `load_state`
+- [x] 5.3 Apply the start-time floor (`ts < int(started)`) and the 30-second future limit in `Gateway.decide` and `verify_person`. The past side of the window stays at 300 seconds
+- [x] 5.4 Have `/healthcheck` return `instance` and `started`. Add a README line on spotting replicas and restarts, by calling it a few times from outside
 
 ## 6. Signed people policy (RT-05 policy; D10; last, can be dropped)
 

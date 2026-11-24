@@ -4,12 +4,15 @@ import json
 import sqlite3
 import time
 
+import jwt
 import pytest
+from fastapi.testclient import TestClient
 
 from gateway import cli, main
 from gateway.lib.common import MAX_MANDATE, sign_bytes
-from gateway.lib.gateway_verify import Request
+from gateway.lib.gateway_verify import CLOCK_SKEW, REQUEST_MAX_AGE, Request
 from gateway.lib.store import Store
+from mcp_server.api.routes_mcp import mcp
 
 from .conftest import entry
 
@@ -114,6 +117,83 @@ def test_raw_nonce_rows_are_migrated_without_a_replay_window(tmp_path):
         assert not upgraded.use_nonce("agent", "captured")
     finally:
         upgraded.close()
+
+
+def test_future_window_is_short_but_the_past_window_stays_usable(world, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: float(now))
+    main.state["gateway"].started = now - REQUEST_MAX_AGE - 1
+    mandate = world.mandate(SEARCH)
+
+    assert world.post(signed_at(world, mandate, now + CLOCK_SKEW, "ahead-ok"))[0] == 200
+    too_far = world.post(signed_at(world, mandate, now + CLOCK_SKEW + 1, "ahead-no"))
+    assert (too_far[0], too_far[1]["decision"]["reason_code"]) == (403, "POP_FAILED")
+    assert world.post(signed_at(world, mandate, now - REQUEST_MAX_AGE + 10, "old-ok"))[0] == 200
+
+
+def test_request_from_before_process_start_is_refused_even_if_nonce_memory_was_lost(state, monkeypatch):
+    key = cli.load_or_create_key(state / "agent.pem")
+    mandate, _ = cli.issue_mandate(
+        state,
+        key.public_key(),
+        scope=[SEARCH],
+        deny=[],
+        ttl=600,
+        purpose="restart test",
+        principal="officer:jsmith",
+        org="test",
+        extra=None,
+        helpers=0,
+    )
+    issued = jwt.decode(mandate, options={"verify_signature": False})["nbf"]
+    clock = {"now": float(issued + 1)}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    monkeypatch.setattr(main, "STATE_DIR", state)
+    monkeypatch.setitem(main.MCP_SERVERS, "pupil-data", mcp)
+    body = cli.sign_request(key, server="pupil-data", tool="search", arguments=LOOKUP, mandate=mandate)
+
+    with TestClient(main.app, raise_server_exceptions=False) as first:
+        assert first.post("/tools/call", json=body).status_code == 200
+
+    (state / "gateway.db").unlink()  # model an ephemeral volume losing replay state
+    clock["now"] += 2
+    with TestClient(main.app, raise_server_exceptions=False) as restarted:
+        response = restarted.post("/tools/call", json=body)
+    assert (response.status_code, response.json()["decision"]["reason_code"]) == (403, "POP_FAILED")
+
+
+def test_healthcheck_identifies_a_process_and_changes_after_restart(world):
+    first = world.client.get("/healthcheck").json()
+    assert world.client.get("/healthcheck").json() == first
+    assert set(first) == {"status", "instance", "started"}
+    with TestClient(main.app, raise_server_exceptions=False) as restarted:
+        second = restarted.get("/healthcheck").json()
+    assert second["instance"] != first["instance"]
+
+
+def test_person_approval_signed_before_process_start_is_refused(world):
+    mandate = world.mandate(entry("draft", urn=["SCH04"], kind=["absence"]), clearance=2)
+    status, reply = world.call("draft", mandate, urn="SCH04", pupil_ids=["P0011"], kind="absence")
+    assert status == 202
+    hold = reply["hold_id"]
+    person_key = cli.load_or_create_key(world.state / "person_officer_jsmith.pem")
+    answer = cli.sign_as_person(person_key, "officer:jsmith", "answer", hold=hold, answer="approve")
+
+    main.state["started"] = answer["ts"] + 1
+    response = world.client.post("/holds/answer", json=answer)
+    assert (response.status_code, response.json()["reason_code"]) == (403, "APPROVER_NOT_VERIFIED")
+    assert world.call("held", mandate, server="gateway", id=hold)[1]["held"]["state"] == "waiting"
+
+
+def test_two_stores_on_one_state_refuse_each_others_nonce(tmp_path):
+    path = tmp_path / "shared.db"
+    first, second = Store(path), Store(path)
+    try:
+        assert first.use_nonce("agent", "same")
+        assert not second.use_nonce("agent", "same")
+    finally:
+        first.close()
+        second.close()
 
 
 def test_deep_json_is_a_4xx_and_does_not_break_the_next_request(world):

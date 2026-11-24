@@ -26,8 +26,9 @@ from .record import safe_text
 from .status_list import is_revoked
 from .store import Store
 
-POLICY_VERSION = "2026-11-24.1"
+POLICY_VERSION = "2026-11-24.2"
 CLOCK_SKEW = 30          # seconds an issuer's clock may run ahead: for the start of validity (nbf) only, never exp
+REQUEST_MAX_AGE = 300    # requests may be this old, but only CLOCK_SKEW seconds ahead
 MAX_DETAIL = 200         # characters of `detail` sent back with a decision
 OWN_SERVER = "gateway"   # where an agent asks after a call that is waiting for a person
 log = logging.getLogger(__name__)
@@ -207,11 +208,12 @@ def clean_arguments(req: Request) -> dict:
 
 class Gateway:
     def __init__(self, registry, status_lists: dict[str, str], step_up_patterns: list[str] | None = None,
-                 store: Store | None = None):
+                 store: Store | None = None, started: float | None = None):
         self.registry = registry
         self.status_lists = status_lists
         self.step_up = step_up_patterns or ["*.write", "*.draft"]
         self.store = store or Store()
+        self.started = time.time() if started is None else started
 
     def verify(self, token: str, now: float | None = None) -> dict:
         """Is this mandate good at `now` (by default, right now)? Returns its claims, or raises Reject."""
@@ -254,7 +256,7 @@ class Gateway:
             claims = self.verify(req.mandate, now)
             jwk = claims["cnf"]["jwk"]
             who = jwk_thumbprint(jwk)
-            if abs(req.ts - now) > 300:
+            if req.ts < int(self.started) or req.ts < now - REQUEST_MAX_AGE or req.ts > now + CLOCK_SKEW:
                 raise Reject("POP_FAILED", "request timestamp outside window")
             if not verify_bytes(jwk_to_pub(jwk), req.signing_input(), req.sig):
                 raise Reject("POP_FAILED", f"bad signature for jkt {who}")

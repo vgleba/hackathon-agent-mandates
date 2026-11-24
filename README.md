@@ -178,7 +178,7 @@ Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or 
 | `SIG_INVALID` | The mandate's issuer signature does not match its payload, e.g. after editing it |
 | `EXPIRED` / `REVOKED` | Out of date, or its index is set in the status list |
 | `WRONG_TOKEN_TYPE` / `ISSUER_NOT_ACCREDITED` / `NOT_YET_VALID` / `STATUS_UNAVAILABLE` | Not a mandate, an issuer not in `trusted_list.json`, `nbf` in the future, or the status list cannot be read |
-| `POP_FAILED` | The request was not signed by the mandate's key, or its nonce has been seen before |
+| `POP_FAILED` | The request was not freshly signed by the mandate's key, predates this gateway process, or reuses a nonce |
 | `DENIED_BY_RULE` | The tool matches a `deny` glob. Checked before scope |
 | `OUT_OF_SCOPE` | No scope entry lists the tool |
 | `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |

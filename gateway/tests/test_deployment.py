@@ -134,7 +134,14 @@ def test_the_image_leaves_out_the_demo_and_every_other_secret():
 def test_without_the_demo_file_the_gateway_works_and_has_no_demo(state):
     """The production image: gateway/demo.py is not there, and GATEWAY_DEMO=1 changes nothing."""
     out = subprocess.run(  # noqa: S603  (this interpreter, a module of ours, a path and JSON we made)
-        [sys.executable, "-m", "gateway.tests.image_probe", str(state), json.dumps(signed_search(state))],
+        [
+            sys.executable,
+            "-m",
+            "gateway.tests.image_probe",
+            str(state),
+            json.dumps(signed_search(state)),
+            str(state / "agent.pem"),
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
